@@ -45,6 +45,13 @@ class Subtask:
     status: TaskStatus = TaskStatus.PENDING
     output: Optional[Any] = None
     error: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class HookResult:
+    allow: bool
+    message: str = ""
 
 
 @dataclass
@@ -82,6 +89,8 @@ class WorkforceExecution:
 
 
 Planner = Callable[[str], List[Subtask]]
+TaskCreatedHook = Callable[[Subtask], HookResult]
+TaskCompletedHook = Callable[[Subtask], HookResult]
 
 
 @dataclass
@@ -89,9 +98,33 @@ class Workforce:
     planner: Planner
     agents: Dict[str, Agent]
     task_router: Callable[[Subtask], str]
+    on_task_created: TaskCreatedHook | None = None
+    on_task_completed: TaskCompletedHook | None = None
+    on_task_completed_rejection_status: TaskStatus = TaskStatus.FAILED
 
     def execute(self, task_id: str, objective: str) -> WorkforceExecution:
-        subtasks = self.planner(objective)
+        if self.on_task_completed_rejection_status not in {TaskStatus.FAILED, TaskStatus.PENDING}:
+            raise ValueError("on_task_completed_rejection_status must be FAILED or PENDING")
+
+        planned_subtasks = self.planner(objective)
+        subtasks: List[Subtask] = []
+
+        for subtask in planned_subtasks:
+            if self.on_task_created is None:
+                subtasks.append(subtask)
+                continue
+
+            hook_result = self.on_task_created(subtask)
+            subtask.metadata["on_task_created"] = {
+                "allow": hook_result.allow,
+                "message": hook_result.message,
+            }
+            if hook_result.allow:
+                subtasks.append(subtask)
+            else:
+                reason = hook_result.message or "Subtask rejected by on_task_created hook"
+                subtask.error = reason
+
         execution = WorkforceExecution(task_id=task_id, subtasks=subtasks)
         subtask_map = {subtask.id: subtask for subtask in execution.subtasks}
 
@@ -100,6 +133,9 @@ class Workforce:
 
             for subtask in execution.subtasks:
                 if subtask.status != TaskStatus.PENDING:
+                    continue
+
+                if subtask.metadata.get("completion_rejected_pending") is True:
                     continue
 
                 if any(dep_id not in subtask_map for dep_id in subtask.depends_on):
@@ -133,6 +169,18 @@ class Workforce:
                     subtask.error = f"Agent '{agent_name}' not found"
                 else:
                     self.agents[agent_name].execute_subtask(subtask)
+                    if subtask.status == TaskStatus.COMPLETED and self.on_task_completed is not None:
+                        hook_result = self.on_task_completed(subtask)
+                        subtask.metadata["on_task_completed"] = {
+                            "allow": hook_result.allow,
+                            "message": hook_result.message,
+                        }
+                        if not hook_result.allow:
+                            reason = hook_result.message or "Subtask rejected by on_task_completed hook"
+                            subtask.error = reason
+                            subtask.status = self.on_task_completed_rejection_status
+                            if self.on_task_completed_rejection_status == TaskStatus.PENDING:
+                                subtask.metadata["completion_rejected_pending"] = True
                 made_progress = True
 
             if not made_progress:
