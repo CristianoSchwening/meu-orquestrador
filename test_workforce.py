@@ -1,4 +1,4 @@
-from workforce import Workforce, Toolkit, Agent, Subtask, TaskStatus
+from workforce import Workforce, Toolkit, Agent, Subtask, TaskStatus, HookResult
 
 
 class SumTool:
@@ -92,3 +92,66 @@ def test_workforce_runs_independent_tasks_without_blocking():
     assert result.status == TaskStatus.COMPLETED
     assert set(calls) == {"A", "B"}
     assert all(task.status == TaskStatus.COMPLETED for task in result.subtasks)
+
+
+def test_on_task_created_allows_and_rejects_subtasks():
+    toolkit = Toolkit()
+    toolkit.register(MarkerTool())
+    calls = []
+
+    allowed = Subtask(id="A", description="allow", tool_name="mark", params={"calls": calls, "name": "A"})
+    rejected = Subtask(id="B", description="reject", tool_name="mark", params={"calls": calls, "name": "B"})
+
+    def on_task_created(subtask: Subtask) -> HookResult:
+        if subtask.id == "B":
+            return HookResult(allow=False, message="policy blocked")
+        return HookResult(allow=True, message="ok")
+
+    workforce = Workforce(
+        planner=lambda _: [allowed, rejected],
+        agents={"main": Agent(name="main", toolkit=toolkit)},
+        task_router=router,
+        on_task_created=on_task_created,
+    )
+
+    result = workforce.execute(task_id="t-created", objective="run")
+
+    assert len(result.subtasks) == 1
+    assert result.subtasks[0].id == "A"
+    assert result.subtasks[0].metadata["on_task_created"]["allow"] is True
+    assert calls == ["A"]
+    assert rejected.error == "policy blocked"
+
+
+def test_on_task_completed_rejection_to_failed_or_pending():
+    toolkit = Toolkit()
+    toolkit.register(SumTool())
+
+    def deny(_subtask: Subtask) -> HookResult:
+        return HookResult(allow=False, message="post-check failed")
+
+    failed_task = Subtask(id="F", description="f", tool_name="sum", params={"a": 1, "b": 2})
+    workforce_failed = Workforce(
+        planner=lambda _: [failed_task],
+        agents={"main": Agent(name="main", toolkit=toolkit)},
+        task_router=router,
+        on_task_completed=deny,
+        on_task_completed_rejection_status=TaskStatus.FAILED,
+    )
+    failed_result = workforce_failed.execute(task_id="t-complete-failed", objective="run")
+    assert failed_result.subtasks[0].status == TaskStatus.FAILED
+    assert failed_result.subtasks[0].error == "post-check failed"
+    assert failed_result.subtasks[0].metadata["on_task_completed"]["allow"] is False
+
+    pending_task = Subtask(id="P", description="p", tool_name="sum", params={"a": 2, "b": 3})
+    workforce_pending = Workforce(
+        planner=lambda _: [pending_task],
+        agents={"main": Agent(name="main", toolkit=toolkit)},
+        task_router=router,
+        on_task_completed=deny,
+        on_task_completed_rejection_status=TaskStatus.PENDING,
+    )
+    pending_result = workforce_pending.execute(task_id="t-complete-pending", objective="run")
+    assert pending_result.subtasks[0].status == TaskStatus.PENDING
+    assert pending_result.subtasks[0].error == "post-check failed"
+    assert pending_result.subtasks[0].metadata["on_task_completed"]["message"] == "post-check failed"
