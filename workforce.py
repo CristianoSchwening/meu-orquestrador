@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Dict, List, Optional, Protocol, Any
+from threading import Lock
+from datetime import datetime, timezone
 import uuid
 
 
@@ -50,7 +52,61 @@ class Subtask:
     status: TaskStatus = TaskStatus.PENDING
     output: Optional[Any] = None
     error: Optional[str] = None
+    claimed_by: str | None = None
+    claimed_at: datetime | None = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class TaskBoard:
+    subtasks: List[Subtask]
+    subtask_map: Dict[str, Subtask] = field(init=False)
+    _lock: Lock = field(default_factory=Lock, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.subtask_map = {subtask.id: subtask for subtask in self.subtasks}
+
+    def claim_next(self, agent_name: str) -> Subtask | None:
+        with self._lock:
+            for subtask in self.subtasks:
+                if subtask.status != TaskStatus.PENDING:
+                    continue
+                if subtask.metadata.get("completion_rejected_pending") is True:
+                    continue
+
+                if any(dep_id not in self.subtask_map for dep_id in subtask.depends_on):
+                    missing = [dep_id for dep_id in subtask.depends_on if dep_id not in self.subtask_map]
+                    subtask.status = TaskStatus.BLOCKED
+                    subtask.blocked_reason = f"Missing dependencies: {', '.join(missing)}"
+                    continue
+
+                deps = [self.subtask_map[dep_id] for dep_id in subtask.depends_on]
+                if any(dep.status == TaskStatus.FAILED for dep in deps):
+                    failed_deps = [dep.id for dep in deps if dep.status == TaskStatus.FAILED]
+                    subtask.status = TaskStatus.BLOCKED
+                    subtask.blocked_reason = f"Blocked by failed dependencies: {', '.join(failed_deps)}"
+                    continue
+
+                if any(dep.status == TaskStatus.BLOCKED for dep in deps):
+                    blocked_deps = [dep.id for dep in deps if dep.status == TaskStatus.BLOCKED]
+                    subtask.status = TaskStatus.BLOCKED
+                    subtask.blocked_reason = f"Blocked by blocked dependencies: {', '.join(blocked_deps)}"
+                    continue
+
+                if not all(dep.status == TaskStatus.COMPLETED for dep in deps):
+                    continue
+
+                route = subtask.metadata.get("routed_agent")
+                if route is not None and route != agent_name:
+                    continue
+
+                if subtask.claimed_by is not None:
+                    continue
+                subtask.claimed_by = agent_name
+                subtask.claimed_at = datetime.now(timezone.utc)
+                return subtask
+
+        return None
 
 
 @dataclass
@@ -152,45 +208,20 @@ class Workforce:
 
         execution = WorkforceExecution(task_id=task_id, subtasks=subtasks, mode=self.execution_mode)
         execution.events.append({"type": "execution_started", "mode": self.execution_mode.value})
-        subtask_map = {subtask.id: subtask for subtask in execution.subtasks}
+        task_board = TaskBoard(execution.subtasks)
         team_context = TeamContext() if self.execution_mode == ExecutionMode.TEAM else None
+
+        for subtask in execution.subtasks:
+            subtask.metadata["routed_agent"] = self.task_router(subtask)
 
         while True:
             made_progress = False
 
-            for subtask in execution.subtasks:
-                if subtask.status != TaskStatus.PENDING:
+            for agent_name in self.agents:
+                subtask = task_board.claim_next(agent_name)
+                if subtask is None:
                     continue
 
-                if subtask.metadata.get("completion_rejected_pending") is True:
-                    continue
-
-                if any(dep_id not in subtask_map for dep_id in subtask.depends_on):
-                    missing = [dep_id for dep_id in subtask.depends_on if dep_id not in subtask_map]
-                    subtask.status = TaskStatus.BLOCKED
-                    subtask.blocked_reason = f"Missing dependencies: {', '.join(missing)}"
-                    made_progress = True
-                    continue
-
-                deps = [subtask_map[dep_id] for dep_id in subtask.depends_on]
-                if any(dep.status == TaskStatus.FAILED for dep in deps):
-                    failed_deps = [dep.id for dep in deps if dep.status == TaskStatus.FAILED]
-                    subtask.status = TaskStatus.BLOCKED
-                    subtask.blocked_reason = f"Blocked by failed dependencies: {', '.join(failed_deps)}"
-                    made_progress = True
-                    continue
-
-                if any(dep.status == TaskStatus.BLOCKED for dep in deps):
-                    blocked_deps = [dep.id for dep in deps if dep.status == TaskStatus.BLOCKED]
-                    subtask.status = TaskStatus.BLOCKED
-                    subtask.blocked_reason = f"Blocked by blocked dependencies: {', '.join(blocked_deps)}"
-                    made_progress = True
-                    continue
-
-                if not all(dep.status == TaskStatus.COMPLETED for dep in deps):
-                    continue
-
-                agent_name = self.task_router(subtask)
                 if agent_name not in self.agents:
                     subtask.status = TaskStatus.FAILED
                     subtask.error = f"Agent '{agent_name}' not found"

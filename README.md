@@ -110,3 +110,13 @@ result = workforce.execute(task_id="task-team", objective="Colaborar")
 print(result.mode)  # ExecutionMode.TEAM
 print(result.events)  # inclui eventos team_context_shared
 ```
+
+## TaskBoard e claims
+
+O orquestrador usa um `TaskBoard` com `claim_next(agent_name)` protegido por lock para coordenar consumo de subtarefas pendentes, com marcação em `Subtask.claimed_by` e `Subtask.claimed_at`.
+
+### Limitações
+
+- Thread-safe apenas em processo local (uso de `threading.Lock`).
+- Não há coordenação distribuída entre múltiplos processos/máquinas.
+- Para distribuição real, seria necessário backend externo (ex.: fila, banco com lock/lease).
