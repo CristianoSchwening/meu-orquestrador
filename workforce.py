@@ -149,11 +149,32 @@ class TeamContext:
 
 
 @dataclass
+class DecisionMetadata:
+    recommended_agents: int
+    estimated_overhead: float
+    independent_subtasks: int
+    dependency_depth: int
+    resource_conflict_score: float
+    parallelism_worth_it: bool
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "recommended_agents": self.recommended_agents,
+            "estimated_overhead": self.estimated_overhead,
+            "independent_subtasks": self.independent_subtasks,
+            "dependency_depth": self.dependency_depth,
+            "resource_conflict_score": self.resource_conflict_score,
+            "parallelism_worth_it": self.parallelism_worth_it,
+        }
+
+
+@dataclass
 class WorkforceExecution:
     task_id: str
     subtasks: List[Subtask]
     mode: ExecutionMode = ExecutionMode.SUBAGENT
     events: List[Dict[str, Any]] = field(default_factory=list)
+    decision_metadata: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def status(self) -> TaskStatus:
@@ -183,11 +204,53 @@ class Workforce:
     on_task_completed_rejection_status: TaskStatus = TaskStatus.FAILED
     execution_mode: ExecutionMode = ExecutionMode.SUBAGENT
 
+    def _dependency_depth(self, subtasks: List[Subtask]) -> int:
+        subtask_map = {subtask.id: subtask for subtask in subtasks}
+        memo: Dict[str, int] = {}
+
+        def depth(subtask_id: str) -> int:
+            if subtask_id in memo:
+                return memo[subtask_id]
+            subtask = subtask_map[subtask_id]
+            if not subtask.depends_on:
+                memo[subtask_id] = 1
+                return 1
+            memo[subtask_id] = 1 + max(depth(dep_id) for dep_id in subtask.depends_on if dep_id in subtask_map)
+            return memo[subtask_id]
+
+        return max((depth(subtask.id) for subtask in subtasks), default=0)
+
+    def _plan_decision_metadata(self, subtasks: List[Subtask]) -> DecisionMetadata:
+        independent_subtasks = sum(1 for subtask in subtasks if not subtask.depends_on)
+        dependency_depth = self._dependency_depth(subtasks)
+
+        tool_counts: Dict[str, int] = {}
+        for subtask in subtasks:
+            tool_counts[subtask.tool_name] = tool_counts.get(subtask.tool_name, 0) + 1
+
+        conflicts = sum(count - 1 for count in tool_counts.values() if count > 1)
+        resource_conflict_score = conflicts / max(1, len(subtasks))
+
+        estimated_overhead = round((dependency_depth * 0.4) + (resource_conflict_score * 0.6), 2)
+        parallel_capacity = max(1, independent_subtasks - dependency_depth + 1)
+        recommended_agents = max(1, min(parallel_capacity, len(self.agents)))
+        parallelism_worth_it = independent_subtasks > 1 and recommended_agents > 1 and estimated_overhead < 0.9
+
+        return DecisionMetadata(
+            recommended_agents=recommended_agents,
+            estimated_overhead=estimated_overhead,
+            independent_subtasks=independent_subtasks,
+            dependency_depth=dependency_depth,
+            resource_conflict_score=round(resource_conflict_score, 2),
+            parallelism_worth_it=parallelism_worth_it,
+        )
+
     def execute(self, task_id: str, objective: str) -> WorkforceExecution:
         if self.on_task_completed_rejection_status not in {TaskStatus.FAILED, TaskStatus.PENDING}:
             raise ValueError("on_task_completed_rejection_status must be FAILED or PENDING")
 
         planned_subtasks = self.planner(objective)
+        decision_metadata = self._plan_decision_metadata(planned_subtasks)
         subtasks: List[Subtask] = []
 
         for subtask in planned_subtasks:
@@ -206,7 +269,12 @@ class Workforce:
                 reason = hook_result.message or "Subtask rejected by on_task_created hook"
                 subtask.error = reason
 
-        execution = WorkforceExecution(task_id=task_id, subtasks=subtasks, mode=self.execution_mode)
+        execution = WorkforceExecution(
+            task_id=task_id,
+            subtasks=subtasks,
+            mode=self.execution_mode,
+            decision_metadata=decision_metadata.as_dict(),
+        )
         execution.events.append({"type": "execution_started", "mode": self.execution_mode.value})
         task_board = TaskBoard(execution.subtasks)
         team_context = TeamContext() if self.execution_mode == ExecutionMode.TEAM else None
