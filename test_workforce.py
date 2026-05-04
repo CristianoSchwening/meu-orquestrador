@@ -293,3 +293,50 @@ def test_taskboard_claim_flow_avoids_double_execution_multithread():
     assert len(executed) == 2
     assert task_a.status == TaskStatus.COMPLETED
     assert task_b.status == TaskStatus.COMPLETED
+
+
+def test_decision_metadata_sequential_plan_recommends_single_agent():
+    toolkit = Toolkit()
+    toolkit.register(SumTool())
+
+    task_a = Subtask(id="A", description="a", tool_name="sum", params={"a": 1, "b": 1})
+    task_b = Subtask(id="B", description="b", tool_name="sum", params={"a": 2, "b": 2}, depends_on=["A"])
+    task_c = Subtask(id="C", description="c", tool_name="sum", params={"a": 3, "b": 3}, depends_on=["B"])
+
+    workforce = Workforce(
+        planner=lambda _: [task_a, task_b, task_c],
+        agents={"main": Agent(name="main", toolkit=toolkit)},
+        task_router=router,
+    )
+
+    result = workforce.execute(task_id="t-meta-seq", objective="run")
+
+    assert result.decision_metadata["recommended_agents"] == 1
+    assert result.decision_metadata["parallelism_worth_it"] is False
+    assert result.decision_metadata["dependency_depth"] == 3
+
+
+def test_decision_metadata_parallel_plan_recommends_more_agents():
+    toolkit = Toolkit()
+    toolkit.register(MarkerTool())
+    calls = []
+
+    workforce = Workforce(
+        planner=lambda _: [
+            Subtask(id="A", description="a", tool_name="mark", params={"calls": calls, "name": "A"}),
+            Subtask(id="B", description="b", tool_name="mark", params={"calls": calls, "name": "B"}),
+            Subtask(id="C", description="c", tool_name="mark", params={"calls": calls, "name": "C"}),
+        ],
+        agents={
+            "a1": Agent(name="a1", toolkit=toolkit),
+            "a2": Agent(name="a2", toolkit=toolkit),
+            "a3": Agent(name="a3", toolkit=toolkit),
+        },
+        task_router=lambda subtask: {"A": "a1", "B": "a2", "C": "a3"}[subtask.id],
+    )
+
+    result = workforce.execute(task_id="t-meta-par", objective="run")
+
+    assert result.decision_metadata["recommended_agents"] >= 2
+    assert result.decision_metadata["parallelism_worth_it"] is True
+    assert result.decision_metadata["independent_subtasks"] == 3
