@@ -1,4 +1,4 @@
-from workforce import Workforce, Toolkit, Agent, Subtask, TaskStatus, HookResult
+from workforce import Workforce, Toolkit, Agent, Subtask, TaskStatus, HookResult, ExecutionMode
 
 
 class SumTool:
@@ -21,6 +21,27 @@ class MarkerTool:
     def run(self, **kwargs):
         kwargs["calls"].append(kwargs["name"])
         return kwargs["name"]
+
+
+class TeamPublishTool:
+    name = "team_publish"
+
+    def run(self, **kwargs):
+        team_context = kwargs.get("team_context")
+        if team_context is not None:
+            team_context.publish(sender=kwargs["sender"], content=kwargs["content"])
+            return len(team_context.read_all())
+        return 0
+
+
+class TeamReadTool:
+    name = "team_read"
+
+    def run(self, **kwargs):
+        team_context = kwargs.get("team_context")
+        if team_context is None:
+            return []
+        return [message["content"] for message in team_context.read_all()]
 
 
 def router(_subtask: Subtask):
@@ -155,3 +176,59 @@ def test_on_task_completed_rejection_to_failed_or_pending():
     assert pending_result.subtasks[0].status == TaskStatus.PENDING
     assert pending_result.subtasks[0].error == "post-check failed"
     assert pending_result.subtasks[0].metadata["on_task_completed"]["message"] == "post-check failed"
+
+
+def test_execution_mode_subagent_keeps_isolated_behavior():
+    toolkit = Toolkit()
+    toolkit.register(TeamPublishTool())
+    toolkit.register(TeamReadTool())
+
+    publish = Subtask(
+        id="A",
+        description="publish",
+        tool_name="team_publish",
+        params={"sender": "agent-a", "content": "hello"},
+    )
+    read = Subtask(id="B", description="read", tool_name="team_read", depends_on=["A"])
+
+    workforce = Workforce(
+        planner=lambda _: [publish, read],
+        agents={"main": Agent(name="main", toolkit=toolkit)},
+        task_router=router,
+        execution_mode=ExecutionMode.SUBAGENT,
+    )
+
+    result = workforce.execute(task_id="t-subagent", objective="run")
+
+    assert result.mode == ExecutionMode.SUBAGENT
+    assert read.output == []
+    assert all(event["type"] != "team_context_shared" for event in result.events)
+
+
+def test_execution_mode_team_shares_context_and_records_events():
+    toolkit = Toolkit()
+    toolkit.register(TeamPublishTool())
+    toolkit.register(TeamReadTool())
+
+    publish = Subtask(
+        id="A",
+        description="publish",
+        tool_name="team_publish",
+        params={"sender": "agent-a", "content": "hello"},
+    )
+    read = Subtask(id="B", description="read", tool_name="team_read", depends_on=["A"])
+
+    workforce = Workforce(
+        planner=lambda _: [publish, read],
+        agents={"main": Agent(name="main", toolkit=toolkit)},
+        task_router=router,
+        execution_mode=ExecutionMode.TEAM,
+    )
+
+    result = workforce.execute(task_id="t-team", objective="run")
+
+    assert result.mode == ExecutionMode.TEAM
+    assert read.output == ["hello"]
+    assert any(event["type"] == "team_context_shared" for event in result.events)
+    assert result.events[0] == {"type": "execution_started", "mode": "team"}
+    assert result.events[-1]["type"] == "execution_finished"

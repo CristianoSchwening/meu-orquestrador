@@ -14,6 +14,11 @@ class TaskStatus(str, Enum):
     BLOCKED = "blocked"
 
 
+class ExecutionMode(str, Enum):
+    SUBAGENT = "subagent"
+    TEAM = "team"
+
+
 class Tool(Protocol):
     name: str
 
@@ -71,9 +76,28 @@ class Agent:
 
 
 @dataclass
+class TeamContext:
+    messages: List[Dict[str, Any]] = field(default_factory=list)
+
+    def publish(self, sender: str, content: Any, subtask_id: str | None = None) -> None:
+        self.messages.append(
+            {
+                "sender": sender,
+                "content": content,
+                "subtask_id": subtask_id,
+            }
+        )
+
+    def read_all(self) -> List[Dict[str, Any]]:
+        return list(self.messages)
+
+
+@dataclass
 class WorkforceExecution:
     task_id: str
     subtasks: List[Subtask]
+    mode: ExecutionMode = ExecutionMode.SUBAGENT
+    events: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def status(self) -> TaskStatus:
@@ -101,6 +125,7 @@ class Workforce:
     on_task_created: TaskCreatedHook | None = None
     on_task_completed: TaskCompletedHook | None = None
     on_task_completed_rejection_status: TaskStatus = TaskStatus.FAILED
+    execution_mode: ExecutionMode = ExecutionMode.SUBAGENT
 
     def execute(self, task_id: str, objective: str) -> WorkforceExecution:
         if self.on_task_completed_rejection_status not in {TaskStatus.FAILED, TaskStatus.PENDING}:
@@ -125,8 +150,10 @@ class Workforce:
                 reason = hook_result.message or "Subtask rejected by on_task_created hook"
                 subtask.error = reason
 
-        execution = WorkforceExecution(task_id=task_id, subtasks=subtasks)
+        execution = WorkforceExecution(task_id=task_id, subtasks=subtasks, mode=self.execution_mode)
+        execution.events.append({"type": "execution_started", "mode": self.execution_mode.value})
         subtask_map = {subtask.id: subtask for subtask in execution.subtasks}
+        team_context = TeamContext() if self.execution_mode == ExecutionMode.TEAM else None
 
         while True:
             made_progress = False
@@ -167,8 +194,38 @@ class Workforce:
                 if agent_name not in self.agents:
                     subtask.status = TaskStatus.FAILED
                     subtask.error = f"Agent '{agent_name}' not found"
+                    execution.events.append(
+                        {"type": "subtask_failed", "subtask_id": subtask.id, "reason": subtask.error}
+                    )
                 else:
+                    if team_context is not None:
+                        subtask.params.setdefault("team_context", team_context)
+                        execution.events.append(
+                            {
+                                "type": "team_context_shared",
+                                "subtask_id": subtask.id,
+                                "agent": agent_name,
+                                "messages_so_far": len(team_context.messages),
+                            }
+                        )
                     self.agents[agent_name].execute_subtask(subtask)
+                    if subtask.status == TaskStatus.COMPLETED:
+                        execution.events.append(
+                            {
+                                "type": "subtask_completed",
+                                "subtask_id": subtask.id,
+                                "agent": agent_name,
+                            }
+                        )
+                    elif subtask.status == TaskStatus.FAILED:
+                        execution.events.append(
+                            {
+                                "type": "subtask_failed",
+                                "subtask_id": subtask.id,
+                                "agent": agent_name,
+                                "reason": subtask.error,
+                            }
+                        )
                     if subtask.status == TaskStatus.COMPLETED and self.on_task_completed is not None:
                         hook_result = self.on_task_completed(subtask)
                         subtask.metadata["on_task_completed"] = {
@@ -185,5 +242,7 @@ class Workforce:
 
             if not made_progress:
                 break
+
+        execution.events.append({"type": "execution_finished", "status": execution.status.value})
 
         return execution
