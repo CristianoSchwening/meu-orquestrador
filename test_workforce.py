@@ -1,4 +1,7 @@
 from workforce import Workforce, Toolkit, Agent, Subtask, TaskStatus, HookResult, ExecutionMode
+from workforce import TaskBoard
+from threading import Thread, Lock
+import time
 
 
 class SumTool:
@@ -232,3 +235,61 @@ def test_execution_mode_team_shares_context_and_records_events():
     assert any(event["type"] == "team_context_shared" for event in result.events)
     assert result.events[0] == {"type": "execution_started", "mode": "team"}
     assert result.events[-1]["type"] == "execution_finished"
+
+
+def test_taskboard_claim_next_thread_safe_prevents_double_claim():
+    subtasks = [Subtask(id="A", description="a", tool_name="sum")]
+    board = TaskBoard(subtasks)
+    claims = []
+    claims_lock = Lock()
+
+    def worker(agent_name: str):
+        claimed = board.claim_next(agent_name)
+        with claims_lock:
+            claims.append((agent_name, claimed.id if claimed else None))
+
+    threads = [Thread(target=worker, args=(f"agent-{i}",)) for i in range(10)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    claimed_ids = [claim_id for _, claim_id in claims if claim_id is not None]
+    assert claimed_ids == ["A"]
+    assert subtasks[0].claimed_by is not None
+    assert subtasks[0].claimed_at is not None
+
+
+def test_taskboard_claim_flow_avoids_double_execution_multithread():
+    task_a = Subtask(id="A", description="a", tool_name="sum", params={"a": 1, "b": 1})
+    task_b = Subtask(id="B", description="b", tool_name="sum", params={"a": 2, "b": 2})
+    for task in (task_a, task_b):
+        task.metadata["routed_agent"] = "main"
+
+    board = TaskBoard([task_a, task_b])
+    toolkit = Toolkit()
+    toolkit.register(SumTool())
+    agent = Agent(name="main", toolkit=toolkit)
+    executed = []
+    executed_lock = Lock()
+
+    def worker():
+        while True:
+            subtask = board.claim_next("main")
+            if subtask is None:
+                return
+            time.sleep(0.01)
+            agent.execute_subtask(subtask)
+            with executed_lock:
+                executed.append(subtask.id)
+
+    threads = [Thread(target=worker) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(executed) == ["A", "B"]
+    assert len(executed) == 2
+    assert task_a.status == TaskStatus.COMPLETED
+    assert task_b.status == TaskStatus.COMPLETED
