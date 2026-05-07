@@ -31,6 +31,10 @@ A pure-Python multi-agent task orchestration library for planning, routing, and 
 - Hook system (`on_task_created`, `on_task_completed`) allows policy enforcement without modifying core logic
 - `ExecutionBudget` enforces guardrails: `max_iterations`, `max_model_calls`, `max_elapsed_ms`, `quality_threshold`
 - `ExecutionMetrics` tracks per-subtask latency, model calls, iteration count, and critic rejections
+- `Agent.max_concurrent` limits simultaneous tasks; `TaskBoard` tracks active counts and enables capacity-based fallback routing
+- `Workforce.dynamic_router` (`DynamicRouterFn`) re-routes pending tasks at runtime using a `RouterContext` snapshot
+- `least_loaded_router` built-in helper always routes to the agent with the fewest active tasks
+- `reroute_pending` calls the router outside the internal lock so slow routers don't block claiming
 - No external runtime dependencies — intentional for portability and simplicity
 
 ## Product
@@ -42,6 +46,8 @@ A pure-Python multi-agent task orchestration library for planning, routing, and 
 - Optional `critic` function (`CriticFn`) enables validation/quality-gating per subtask
 - Optional `human_approval_gate` for high-risk task approval flows
 - `ExecutionBudget` limits cost/latency in iterative or critic-driven patterns
+- `Agent.max_concurrent` + `Workforce.dynamic_router` enable capacity-aware, load-balanced routing
+- `least_loaded_router(subtask, context)` — drop-in router that spreads work across available agents
 
 ## User preferences
 

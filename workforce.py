@@ -73,16 +73,72 @@ class Subtask:
 
 
 @dataclass
+class RouterContext:
+    """Snapshot of agent load state provided to a dynamic_router at routing time."""
+
+    agent_loads: Dict[str, int]
+    agent_capacities: Dict[str, int]
+    available_agents: List[str]
+
+
+@dataclass
 class TaskBoard:
     subtasks: List[Subtask]
+    agent_capacities: Dict[str, int] = field(default_factory=dict)
     subtask_map: Dict[str, Subtask] = field(init=False)
     _lock: Lock = field(default_factory=Lock, init=False, repr=False)
+    _active_counts: Dict[str, int] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
         self.subtask_map = {subtask.id: subtask for subtask in self.subtasks}
 
+    @property
+    def active_counts(self) -> Dict[str, int]:
+        with self._lock:
+            return dict(self._active_counts)
+
+    def release(self, agent_name: str) -> None:
+        with self._lock:
+            self._active_counts[agent_name] = max(0, self._active_counts.get(agent_name, 0) - 1)
+
+    def reroute_pending(
+        self, router_fn: Callable[["Subtask"], str]
+    ) -> List[Tuple[str, Optional[str], str]]:
+        """Re-evaluate routing for all pending unclaimed subtasks.
+
+        The router function is intentionally called *outside* the internal lock
+        so that slow or blocking routers do not hold up other board operations.
+
+        Returns a list of ``(subtask_id, old_route, new_route)`` for every
+        subtask whose route was actually changed.
+        """
+        with self._lock:
+            snapshot = [
+                (subtask, subtask.metadata.get("routed_agent"))
+                for subtask in self.subtasks
+                if subtask.status == TaskStatus.PENDING and subtask.claimed_by is None
+            ]
+
+        proposed: List[Tuple["Subtask", Optional[str], str]] = [
+            (subtask, old_route, router_fn(subtask)) for subtask, old_route in snapshot
+        ]
+
+        changes: List[Tuple[str, Optional[str], str]] = []
+        with self._lock:
+            for subtask, old_route, new_route in proposed:
+                if subtask.status != TaskStatus.PENDING or subtask.claimed_by is not None:
+                    continue
+                if new_route != old_route:
+                    subtask.metadata["routed_agent"] = new_route
+                    changes.append((subtask.id, old_route, new_route))
+        return changes
+
     def claim_next(self, agent_name: str) -> Subtask | None:
         with self._lock:
+            capacity = self.agent_capacities.get(agent_name)
+            if capacity is not None and self._active_counts.get(agent_name, 0) >= capacity:
+                return None
+
             for subtask in self.subtasks:
                 if subtask.status != TaskStatus.PENDING:
                     continue
@@ -113,12 +169,17 @@ class TaskBoard:
 
                 route = subtask.metadata.get("routed_agent")
                 if route is not None and route != agent_name:
-                    continue
+                    preferred_capacity = self.agent_capacities.get(route)
+                    if preferred_capacity is None:
+                        continue
+                    if self._active_counts.get(route, 0) < preferred_capacity:
+                        continue
 
                 if subtask.claimed_by is not None:
                     continue
                 subtask.claimed_by = agent_name
                 subtask.claimed_at = datetime.now(timezone.utc)
+                self._active_counts[agent_name] = self._active_counts.get(agent_name, 0) + 1
                 return subtask
 
         return None
@@ -182,6 +243,7 @@ class ExecutionMetrics:
 class Agent:
     name: str
     toolkit: Toolkit
+    max_concurrent: int | None = None
 
     def execute_subtask(self, task: Subtask) -> Subtask:
         task.status = TaskStatus.RUNNING
@@ -260,6 +322,22 @@ TaskCreatedHook = Callable[[Subtask], HookResult]
 TaskCompletedHook = Callable[[Subtask], HookResult]
 CriticFn = Callable[[Subtask], CriticResult]
 HumanApprovalGate = Callable[[Subtask], bool]
+DynamicRouterFn = Callable[[Subtask, RouterContext], str]
+
+
+def least_loaded_router(subtask: Subtask, context: RouterContext) -> str:
+    """Built-in dynamic router that always routes to the agent with the fewest active tasks.
+
+    When multiple agents share the same load, the first one in ``available_agents``
+    is chosen (insertion order of the agents dict).  Falls back to the current
+    static route when no agent information is available.
+    """
+    candidates = context.available_agents
+    if not candidates:
+        candidates = list(context.agent_capacities.keys())
+    if not candidates:
+        return subtask.metadata.get("routed_agent", "")
+    return min(candidates, key=lambda a: context.agent_loads.get(a, 0))
 
 
 @dataclass
@@ -275,6 +353,7 @@ class Workforce:
     budget: ExecutionBudget | None = None
     critic: CriticFn | None = None
     human_approval_gate: HumanApprovalGate | None = None
+    dynamic_router: DynamicRouterFn | None = None
 
     def _dependency_depth(self, subtasks: List[Subtask]) -> int:
         subtask_map = {subtask.id: subtask for subtask in subtasks}
@@ -328,6 +407,41 @@ class Workforce:
         if self.budget.max_iterations is not None and metrics.iterations >= self.budget.max_iterations:
             return True, f"max_iterations ({self.budget.max_iterations}) exceeded"
         return False, ""
+
+    def _build_router_context(self, task_board: TaskBoard) -> RouterContext:
+        loads = task_board.active_counts
+        capacities = {
+            name: agent.max_concurrent
+            for name, agent in self.agents.items()
+            if agent.max_concurrent is not None
+        }
+        available = [
+            name
+            for name in self.agents
+            if capacities.get(name) is None or loads.get(name, 0) < capacities[name]
+        ]
+        return RouterContext(
+            agent_loads=loads,
+            agent_capacities=capacities,
+            available_agents=available,
+        )
+
+    def _apply_dynamic_routing(
+        self, execution: WorkforceExecution, task_board: TaskBoard
+    ) -> None:
+        if self.dynamic_router is None:
+            return
+        context = self._build_router_context(task_board)
+        changes = task_board.reroute_pending(lambda subtask: self.dynamic_router(subtask, context))  # type: ignore[arg-type]
+        for subtask_id, old_route, new_route in changes:
+            execution.events.append(
+                {
+                    "type": "subtask_rerouted",
+                    "subtask_id": subtask_id,
+                    "from_agent": old_route,
+                    "to_agent": new_route,
+                }
+            )
 
     def _apply_team_context(
         self,
@@ -473,6 +587,8 @@ class Workforce:
             self._apply_critic(subtask, execution, task_board, metrics)
             self._apply_human_gate(subtask, execution, task_board)
 
+        task_board.release(agent_name)
+
     def _execute_sequential(
         self,
         execution: WorkforceExecution,
@@ -486,6 +602,8 @@ class Workforce:
             if exceeded:
                 execution.events.append({"type": "budget_exceeded", "reason": reason})
                 break
+
+            self._apply_dynamic_routing(execution, task_board)
 
             made_progress = False
             for agent_name in self.agents:
@@ -512,6 +630,7 @@ class Workforce:
                 if exceeded:
                     execution.events.append({"type": "budget_exceeded", "reason": reason})
                     break
+                self._apply_dynamic_routing(execution, task_board)
                 subtask = task_board.claim_next(agent_name)
                 if subtask is None:
                     break
@@ -537,6 +656,8 @@ class Workforce:
             if exceeded:
                 execution.events.append({"type": "budget_exceeded", "reason": reason})
                 break
+
+            self._apply_dynamic_routing(execution, task_board)
 
             made_progress = False
             for agent_name in self.agents:
@@ -604,7 +725,12 @@ class Workforce:
             }
         )
 
-        task_board = TaskBoard(execution.subtasks)
+        agent_capacities = {
+            name: agent.max_concurrent
+            for name, agent in self.agents.items()
+            if agent.max_concurrent is not None
+        }
+        task_board = TaskBoard(execution.subtasks, agent_capacities=agent_capacities)
         team_context = TeamContext() if self.execution_mode == ExecutionMode.TEAM else None
         metrics = ExecutionMetrics()
         start = datetime.now(timezone.utc)

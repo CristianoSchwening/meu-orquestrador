@@ -9,7 +9,9 @@ from workforce import (
     ExecutionPattern,
     ExecutionBudget,
     CriticResult,
+    RouterContext,
     TaskBoard,
+    least_loaded_router,
 )
 from threading import Thread, Lock
 import time
@@ -649,3 +651,256 @@ def test_subtask_tracks_attempt_and_timing_fields():
     assert subtask.started_at is not None
     assert subtask.completed_at is not None
     assert subtask.completed_at >= subtask.started_at
+
+
+def test_agent_max_concurrent_limits_parallel_claims():
+    toolkit = Toolkit()
+    toolkit.register(SlowMarkerTool())
+    calls = []
+    concurrent_peak = [0]
+    concurrent_now = [0]
+    concurrent_lock = Lock()
+
+    class TrackingTool:
+        name = "track"
+
+        def run(self, **kwargs):
+            with concurrent_lock:
+                concurrent_now[0] += 1
+                if concurrent_now[0] > concurrent_peak[0]:
+                    concurrent_peak[0] = concurrent_now[0]
+            time.sleep(0.05)
+            with concurrent_lock:
+                concurrent_now[0] -= 1
+            calls.append(kwargs["name"])
+            return kwargs["name"]
+
+    tracking_toolkit = Toolkit()
+    tracking_toolkit.register(TrackingTool())
+
+    tasks = [
+        Subtask(id=str(i), description=f"t{i}", tool_name="track", params={"name": str(i)})
+        for i in range(4)
+    ]
+
+    workforce = Workforce(
+        planner=lambda _: tasks,
+        agents={
+            "worker": Agent(name="worker", toolkit=tracking_toolkit, max_concurrent=1),
+        },
+        task_router=lambda _: "worker",
+        execution_pattern=ExecutionPattern.PARALLEL,
+    )
+
+    result = workforce.execute(task_id="t-max-concurrent", objective="run")
+
+    assert result.status == TaskStatus.COMPLETED
+    assert len(calls) == 4
+    assert concurrent_peak[0] == 1, "max_concurrent=1 must prevent more than one simultaneous run"
+
+
+def test_capacity_fallback_reroutes_task_when_preferred_agent_at_capacity():
+    slow_toolkit = Toolkit()
+    claim_order = []
+    claim_lock = Lock()
+
+    class SlowSumTool:
+        name = "slow_sum"
+
+        def run(self, **kwargs):
+            time.sleep(0.08)
+            return kwargs["a"] + kwargs["b"]
+
+    slow_toolkit.register(SlowSumTool())
+
+    class RecordingAgent(Agent):
+        def execute_subtask(self, task):
+            with claim_lock:
+                claim_order.append(self.name)
+            return super().execute_subtask(task)
+
+    tasks = [
+        Subtask(id="X", description="x", tool_name="slow_sum", params={"a": 1, "b": 2}),
+        Subtask(id="Y", description="y", tool_name="slow_sum", params={"a": 3, "b": 4}),
+    ]
+
+    workforce = Workforce(
+        planner=lambda _: tasks,
+        agents={
+            "a": RecordingAgent(name="a", toolkit=slow_toolkit, max_concurrent=1),
+            "b": RecordingAgent(name="b", toolkit=slow_toolkit, max_concurrent=1),
+        },
+        task_router=lambda _: "a",
+        execution_pattern=ExecutionPattern.PARALLEL,
+    )
+
+    result = workforce.execute(task_id="t-fallback", objective="run")
+
+    assert result.status == TaskStatus.COMPLETED
+    assert set(claim_order) == {"a", "b"}, "Agent b should handle task Y while a is busy with X"
+
+
+def test_dynamic_router_reroutes_pending_subtasks():
+    toolkit = Toolkit()
+    toolkit.register(MarkerTool())
+    calls = []
+    routed_to = {}
+
+    def static_router(subtask):
+        return "a"
+
+    def dynamic(subtask, context):
+        if subtask.id == "B":
+            return "b"
+        return "a"
+
+    class RecordingAgent(Agent):
+        def execute_subtask(self, task):
+            routed_to[task.id] = self.name
+            return super().execute_subtask(task)
+
+    workforce = Workforce(
+        planner=lambda _: [
+            Subtask(id="A", description="a", tool_name="mark", params={"calls": calls, "name": "A"}),
+            Subtask(id="B", description="b", tool_name="mark", params={"calls": calls, "name": "B"}),
+        ],
+        agents={
+            "a": RecordingAgent(name="a", toolkit=toolkit),
+            "b": RecordingAgent(name="b", toolkit=toolkit),
+        },
+        task_router=static_router,
+        dynamic_router=dynamic,
+    )
+
+    result = workforce.execute(task_id="t-dynamic-router", objective="run")
+
+    assert result.status == TaskStatus.COMPLETED
+    assert routed_to.get("A") == "a"
+    assert routed_to.get("B") == "b"
+    rerouted = [e for e in result.events if e["type"] == "subtask_rerouted"]
+    assert any(e["subtask_id"] == "B" and e["to_agent"] == "b" for e in rerouted)
+
+
+def test_dynamic_router_receives_correct_context_fields():
+    toolkit = Toolkit()
+    toolkit.register(SumTool())
+    captured_contexts = []
+
+    def capturing_dynamic_router(subtask, context):
+        captured_contexts.append(context)
+        return "main"
+
+    workforce = Workforce(
+        planner=lambda _: [Subtask(id="A", description="a", tool_name="sum", params={"a": 1, "b": 1})],
+        agents={"main": Agent(name="main", toolkit=toolkit, max_concurrent=2)},
+        task_router=lambda _: "main",
+        dynamic_router=capturing_dynamic_router,
+    )
+
+    result = workforce.execute(task_id="t-ctx-fields", objective="run")
+
+    assert result.status == TaskStatus.COMPLETED
+    assert len(captured_contexts) >= 1
+    ctx = captured_contexts[0]
+    assert isinstance(ctx, RouterContext)
+    assert "main" in ctx.agent_capacities
+    assert ctx.agent_capacities["main"] == 2
+    assert isinstance(ctx.agent_loads, dict)
+    assert isinstance(ctx.available_agents, list)
+
+
+def test_least_loaded_router_selects_least_busy_agent():
+    context = RouterContext(
+        agent_loads={"a": 3, "b": 1, "c": 2},
+        agent_capacities={"a": 5, "b": 5, "c": 5},
+        available_agents=["a", "b", "c"],
+    )
+    subtask = Subtask(id="X", description="x", tool_name="sum")
+    subtask.metadata["routed_agent"] = "a"
+
+    result = least_loaded_router(subtask, context)
+    assert result == "b", "Should pick the agent with load=1 (least loaded)"
+
+
+def test_least_loaded_router_falls_back_when_no_available():
+    context = RouterContext(
+        agent_loads={"a": 1},
+        agent_capacities={"a": 1},
+        available_agents=[],
+    )
+    subtask = Subtask(id="X", description="x", tool_name="sum")
+
+    result = least_loaded_router(subtask, context)
+    assert result == "a", "Should fall back to least loaded from capacities when none available"
+
+
+def test_least_loaded_router_works_end_to_end():
+    routed_to = {}
+    routed_lock = Lock()
+
+    class SlowRecordTool:
+        name = "slow_record"
+
+        def run(self, **kwargs):
+            time.sleep(kwargs.get("delay", 0.05))
+            return kwargs["name"]
+
+    slow_toolkit = Toolkit()
+    slow_toolkit.register(SlowRecordTool())
+
+    class RecordingAgent(Agent):
+        def execute_subtask(self, task):
+            with routed_lock:
+                routed_to[task.id] = self.name
+            return super().execute_subtask(task)
+
+    workforce = Workforce(
+        planner=lambda _: [
+            Subtask(id="A", description="a", tool_name="slow_record", params={"name": "A", "delay": 0.1}),
+            Subtask(id="B", description="b", tool_name="slow_record", params={"name": "B", "delay": 0.01}),
+            Subtask(id="C", description="c", tool_name="slow_record", params={"name": "C", "delay": 0.01}),
+        ],
+        agents={
+            "x": RecordingAgent(name="x", toolkit=slow_toolkit, max_concurrent=2),
+            "y": RecordingAgent(name="y", toolkit=slow_toolkit, max_concurrent=2),
+        },
+        task_router=lambda _: "x",
+        dynamic_router=least_loaded_router,
+        execution_pattern=ExecutionPattern.PARALLEL,
+    )
+
+    result = workforce.execute(task_id="t-llr-e2e", objective="run")
+
+    assert result.status == TaskStatus.COMPLETED
+    assert set(routed_to.keys()) == {"A", "B", "C"}
+    assert "y" in routed_to.values(), "least_loaded_router should spread tasks to agent y"
+
+
+def test_reroute_event_emitted_on_route_change():
+    toolkit = Toolkit()
+    toolkit.register(SumTool())
+
+    call_count = [0]
+
+    def dynamic(subtask, context):
+        call_count[0] += 1
+        return "b"
+
+    workforce = Workforce(
+        planner=lambda _: [Subtask(id="T", description="t", tool_name="sum", params={"a": 1, "b": 2})],
+        agents={
+            "a": Agent(name="a", toolkit=toolkit),
+            "b": Agent(name="b", toolkit=toolkit),
+        },
+        task_router=lambda _: "a",
+        dynamic_router=dynamic,
+    )
+
+    result = workforce.execute(task_id="t-reroute-event", objective="run")
+
+    assert result.status == TaskStatus.COMPLETED
+    reroute_events = [e for e in result.events if e["type"] == "subtask_rerouted"]
+    assert len(reroute_events) == 1
+    assert reroute_events[0]["subtask_id"] == "T"
+    assert reroute_events[0]["from_agent"] == "a"
+    assert reroute_events[0]["to_agent"] == "b"
