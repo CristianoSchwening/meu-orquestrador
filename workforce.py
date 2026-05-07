@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Dict, List, Optional, Protocol, Any
+from typing import Callable, Dict, List, Optional, Protocol, Any, Tuple
 from threading import Lock
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 import uuid
 
 
@@ -19,6 +20,14 @@ class TaskStatus(str, Enum):
 class ExecutionMode(str, Enum):
     SUBAGENT = "subagent"
     TEAM = "team"
+
+
+class ExecutionPattern(str, Enum):
+    SEQUENTIAL = "sequential"
+    PARALLEL = "parallel"
+    REVIEW_CRITIC = "review_critic"
+    ITERATIVE_REFINEMENT = "iterative_refinement"
+    HUMAN_IN_THE_LOOP = "human_in_the_loop"
 
 
 class Tool(Protocol):
@@ -55,6 +64,12 @@ class Subtask:
     claimed_by: str | None = None
     claimed_at: datetime | None = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    attempt: int = 0
+    parent_subtask_id: str | None = None
+    quality_score: float | None = None
+    critic_feedback: str | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
 
 
 @dataclass
@@ -108,11 +123,59 @@ class TaskBoard:
 
         return None
 
+    def reset_for_retry(self, subtask: Subtask) -> None:
+        with self._lock:
+            subtask.claimed_by = None
+            subtask.claimed_at = None
+            subtask.status = TaskStatus.PENDING
+            subtask.metadata.pop("completion_rejected_pending", None)
+
 
 @dataclass
 class HookResult:
     allow: bool
     message: str = ""
+
+
+@dataclass
+class CriticResult:
+    approved: bool
+    score: float = 1.0
+    feedback: str = ""
+
+
+@dataclass
+class ExecutionBudget:
+    max_iterations: int | None = None
+    max_model_calls: int | None = None
+    max_elapsed_ms: float | None = None
+    quality_threshold: float | None = None
+
+
+@dataclass
+class ExecutionMetrics:
+    total_elapsed_ms: float = 0.0
+    model_calls: int = 0
+    iterations: int = 0
+    critic_rejections: int = 0
+    subtask_latencies: Dict[str, float] = field(default_factory=dict)
+    _lock: Lock = field(default_factory=Lock, init=False, repr=False)
+
+    def record_subtask(self, subtask: Subtask) -> None:
+        if subtask.started_at and subtask.completed_at:
+            latency_ms = (subtask.completed_at - subtask.started_at).total_seconds() * 1000
+            with self._lock:
+                self.subtask_latencies[subtask.id] = round(latency_ms, 2)
+                self.model_calls += 1
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "total_elapsed_ms": round(self.total_elapsed_ms, 2),
+            "model_calls": self.model_calls,
+            "iterations": self.iterations,
+            "critic_rejections": self.critic_rejections,
+            "subtask_latencies": dict(self.subtask_latencies),
+        }
 
 
 @dataclass
@@ -122,12 +185,14 @@ class Agent:
 
     def execute_subtask(self, task: Subtask) -> Subtask:
         task.status = TaskStatus.RUNNING
+        task.started_at = datetime.now(timezone.utc)
         try:
             task.output = self.toolkit.execute(task.tool_name, **task.params)
             task.status = TaskStatus.COMPLETED
         except Exception as exc:  # noqa: BLE001
             task.status = TaskStatus.FAILED
             task.error = str(exc)
+        task.completed_at = datetime.now(timezone.utc)
         return task
 
 
@@ -175,6 +240,7 @@ class WorkforceExecution:
     mode: ExecutionMode = ExecutionMode.SUBAGENT
     events: List[Dict[str, Any]] = field(default_factory=list)
     decision_metadata: Dict[str, Any] = field(default_factory=dict)
+    metrics: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def status(self) -> TaskStatus:
@@ -192,6 +258,8 @@ class WorkforceExecution:
 Planner = Callable[[str], List[Subtask]]
 TaskCreatedHook = Callable[[Subtask], HookResult]
 TaskCompletedHook = Callable[[Subtask], HookResult]
+CriticFn = Callable[[Subtask], CriticResult]
+HumanApprovalGate = Callable[[Subtask], bool]
 
 
 @dataclass
@@ -203,6 +271,10 @@ class Workforce:
     on_task_completed: TaskCompletedHook | None = None
     on_task_completed_rejection_status: TaskStatus = TaskStatus.FAILED
     execution_mode: ExecutionMode = ExecutionMode.SUBAGENT
+    execution_pattern: ExecutionPattern = ExecutionPattern.SEQUENTIAL
+    budget: ExecutionBudget | None = None
+    critic: CriticFn | None = None
+    human_approval_gate: HumanApprovalGate | None = None
 
     def _dependency_depth(self, subtasks: List[Subtask]) -> int:
         subtask_map = {subtask.id: subtask for subtask in subtasks}
@@ -245,6 +317,255 @@ class Workforce:
             parallelism_worth_it=parallelism_worth_it,
         )
 
+    def _is_budget_exceeded(self, metrics: ExecutionMetrics, start: datetime) -> Tuple[bool, str]:
+        if self.budget is None:
+            return False, ""
+        elapsed = (datetime.now(timezone.utc) - start).total_seconds() * 1000
+        if self.budget.max_elapsed_ms is not None and elapsed > self.budget.max_elapsed_ms:
+            return True, f"max_elapsed_ms ({self.budget.max_elapsed_ms}ms) exceeded"
+        if self.budget.max_model_calls is not None and metrics.model_calls >= self.budget.max_model_calls:
+            return True, f"max_model_calls ({self.budget.max_model_calls}) exceeded"
+        if self.budget.max_iterations is not None and metrics.iterations >= self.budget.max_iterations:
+            return True, f"max_iterations ({self.budget.max_iterations}) exceeded"
+        return False, ""
+
+    def _apply_team_context(
+        self,
+        subtask: Subtask,
+        team_context: TeamContext | None,
+        execution: WorkforceExecution,
+        agent_name: str,
+    ) -> None:
+        if team_context is not None:
+            subtask.params.setdefault("team_context", team_context)
+            execution.events.append(
+                {
+                    "type": "team_context_shared",
+                    "subtask_id": subtask.id,
+                    "agent": agent_name,
+                    "messages_so_far": len(team_context.messages),
+                }
+            )
+
+    def _apply_on_task_completed_hook(
+        self,
+        subtask: Subtask,
+        execution: WorkforceExecution,
+        task_board: TaskBoard,
+    ) -> None:
+        if subtask.status != TaskStatus.COMPLETED or self.on_task_completed is None:
+            return
+        hook_result = self.on_task_completed(subtask)
+        subtask.metadata["on_task_completed"] = {
+            "allow": hook_result.allow,
+            "message": hook_result.message,
+        }
+        if not hook_result.allow:
+            reason = hook_result.message or "Subtask rejected by on_task_completed hook"
+            subtask.error = reason
+            subtask.status = self.on_task_completed_rejection_status
+            if self.on_task_completed_rejection_status == TaskStatus.PENDING:
+                subtask.metadata["completion_rejected_pending"] = True
+
+    def _apply_critic(
+        self,
+        subtask: Subtask,
+        execution: WorkforceExecution,
+        task_board: TaskBoard,
+        metrics: ExecutionMetrics,
+    ) -> bool:
+        if subtask.status != TaskStatus.COMPLETED or self.critic is None:
+            return True
+
+        critic_result = self.critic(subtask)
+        subtask.quality_score = critic_result.score
+        subtask.critic_feedback = critic_result.feedback
+        subtask.metadata["critic"] = {
+            "approved": critic_result.approved,
+            "score": critic_result.score,
+            "feedback": critic_result.feedback,
+        }
+
+        threshold = self.budget.quality_threshold if self.budget else None
+        auto_approved = threshold is not None and critic_result.score >= threshold
+        approved = critic_result.approved or auto_approved
+
+        if not approved:
+            metrics.critic_rejections += 1
+            max_iter = self.budget.max_iterations if self.budget else None
+            if max_iter is None or subtask.attempt < max_iter:
+                subtask.attempt += 1
+                subtask.output = None
+                subtask.error = None
+                task_board.reset_for_retry(subtask)
+                execution.events.append(
+                    {
+                        "type": "subtask_retry",
+                        "subtask_id": subtask.id,
+                        "attempt": subtask.attempt,
+                        "critic_feedback": critic_result.feedback,
+                    }
+                )
+                return False
+            else:
+                subtask.status = TaskStatus.FAILED
+                subtask.error = f"Critic rejected after {subtask.attempt} attempts: {critic_result.feedback}"
+                execution.events.append(
+                    {
+                        "type": "subtask_critic_exhausted",
+                        "subtask_id": subtask.id,
+                        "attempts": subtask.attempt,
+                    }
+                )
+        return True
+
+    def _apply_human_gate(
+        self,
+        subtask: Subtask,
+        execution: WorkforceExecution,
+        task_board: TaskBoard,
+    ) -> bool:
+        if subtask.status != TaskStatus.COMPLETED or self.human_approval_gate is None:
+            return True
+
+        approved = self.human_approval_gate(subtask)
+        subtask.metadata["human_approval"] = {"approved": approved}
+
+        if not approved:
+            subtask.status = TaskStatus.FAILED
+            subtask.error = "Rejected by human approval gate"
+            execution.events.append({"type": "subtask_human_rejected", "subtask_id": subtask.id})
+            return False
+
+        execution.events.append({"type": "subtask_human_approved", "subtask_id": subtask.id})
+        return True
+
+    def _run_one_subtask(
+        self,
+        agent_name: str,
+        subtask: Subtask,
+        team_context: TeamContext | None,
+        execution: WorkforceExecution,
+        task_board: TaskBoard,
+        metrics: ExecutionMetrics,
+    ) -> None:
+        self._apply_team_context(subtask, team_context, execution, agent_name)
+        self.agents[agent_name].execute_subtask(subtask)
+        metrics.record_subtask(subtask)
+
+        if subtask.status == TaskStatus.COMPLETED:
+            execution.events.append(
+                {"type": "subtask_completed", "subtask_id": subtask.id, "agent": agent_name}
+            )
+        elif subtask.status == TaskStatus.FAILED:
+            execution.events.append(
+                {
+                    "type": "subtask_failed",
+                    "subtask_id": subtask.id,
+                    "agent": agent_name,
+                    "reason": subtask.error,
+                }
+            )
+
+        self._apply_on_task_completed_hook(subtask, execution, task_board)
+
+        if self.execution_pattern in (ExecutionPattern.REVIEW_CRITIC, ExecutionPattern.HUMAN_IN_THE_LOOP):
+            self._apply_critic(subtask, execution, task_board, metrics)
+            self._apply_human_gate(subtask, execution, task_board)
+
+    def _execute_sequential(
+        self,
+        execution: WorkforceExecution,
+        task_board: TaskBoard,
+        team_context: TeamContext | None,
+        metrics: ExecutionMetrics,
+        start: datetime,
+    ) -> None:
+        while True:
+            exceeded, reason = self._is_budget_exceeded(metrics, start)
+            if exceeded:
+                execution.events.append({"type": "budget_exceeded", "reason": reason})
+                break
+
+            made_progress = False
+            for agent_name in self.agents:
+                subtask = task_board.claim_next(agent_name)
+                if subtask is None:
+                    continue
+                self._run_one_subtask(agent_name, subtask, team_context, execution, task_board, metrics)
+                made_progress = True
+
+            if not made_progress:
+                break
+
+    def _execute_parallel(
+        self,
+        execution: WorkforceExecution,
+        task_board: TaskBoard,
+        team_context: TeamContext | None,
+        metrics: ExecutionMetrics,
+        start: datetime,
+    ) -> None:
+        def worker(agent_name: str) -> None:
+            while True:
+                exceeded, reason = self._is_budget_exceeded(metrics, start)
+                if exceeded:
+                    execution.events.append({"type": "budget_exceeded", "reason": reason})
+                    break
+                subtask = task_board.claim_next(agent_name)
+                if subtask is None:
+                    break
+                self._run_one_subtask(agent_name, subtask, team_context, execution, task_board, metrics)
+
+        with ThreadPoolExecutor(max_workers=len(self.agents)) as executor:
+            futures = [executor.submit(worker, name) for name in self.agents]
+            for f in futures:
+                f.result()
+
+    def _execute_iterative_refinement(
+        self,
+        execution: WorkforceExecution,
+        task_board: TaskBoard,
+        team_context: TeamContext | None,
+        metrics: ExecutionMetrics,
+        start: datetime,
+    ) -> None:
+        max_iter = self.budget.max_iterations if self.budget else None
+
+        while True:
+            exceeded, reason = self._is_budget_exceeded(metrics, start)
+            if exceeded:
+                execution.events.append({"type": "budget_exceeded", "reason": reason})
+                break
+
+            made_progress = False
+            for agent_name in self.agents:
+                subtask = task_board.claim_next(agent_name)
+                if subtask is None:
+                    continue
+                self._run_one_subtask(agent_name, subtask, team_context, execution, task_board, metrics)
+                made_progress = True
+
+            if not made_progress:
+                needs_refinement = False
+                for subtask in execution.subtasks:
+                    if subtask.status == TaskStatus.COMPLETED:
+                        approved = self._apply_critic(subtask, execution, task_board, metrics)
+                        if not approved:
+                            needs_refinement = True
+
+                if not needs_refinement:
+                    break
+
+                metrics.iterations += 1
+                execution.events.append({"type": "refinement_cycle", "iteration": metrics.iterations})
+
+                if max_iter is not None and metrics.iterations >= max_iter:
+                    execution.events.append(
+                        {"type": "max_iterations_reached", "iterations": metrics.iterations}
+                    )
+                    break
+
     def execute(self, task_id: str, objective: str) -> WorkforceExecution:
         if self.on_task_completed_rejection_status not in {TaskStatus.FAILED, TaskStatus.PENDING}:
             raise ValueError("on_task_completed_rejection_status must be FAILED or PENDING")
@@ -275,73 +596,31 @@ class Workforce:
             mode=self.execution_mode,
             decision_metadata=decision_metadata.as_dict(),
         )
-        execution.events.append({"type": "execution_started", "mode": self.execution_mode.value})
+        execution.events.append(
+            {
+                "type": "execution_started",
+                "mode": self.execution_mode.value,
+                "pattern": self.execution_pattern.value,
+            }
+        )
+
         task_board = TaskBoard(execution.subtasks)
         team_context = TeamContext() if self.execution_mode == ExecutionMode.TEAM else None
+        metrics = ExecutionMetrics()
+        start = datetime.now(timezone.utc)
 
         for subtask in execution.subtasks:
             subtask.metadata["routed_agent"] = self.task_router(subtask)
 
-        while True:
-            made_progress = False
+        if self.execution_pattern == ExecutionPattern.PARALLEL:
+            self._execute_parallel(execution, task_board, team_context, metrics, start)
+        elif self.execution_pattern == ExecutionPattern.ITERATIVE_REFINEMENT:
+            self._execute_iterative_refinement(execution, task_board, team_context, metrics, start)
+        else:
+            self._execute_sequential(execution, task_board, team_context, metrics, start)
 
-            for agent_name in self.agents:
-                subtask = task_board.claim_next(agent_name)
-                if subtask is None:
-                    continue
-
-                if agent_name not in self.agents:
-                    subtask.status = TaskStatus.FAILED
-                    subtask.error = f"Agent '{agent_name}' not found"
-                    execution.events.append(
-                        {"type": "subtask_failed", "subtask_id": subtask.id, "reason": subtask.error}
-                    )
-                else:
-                    if team_context is not None:
-                        subtask.params.setdefault("team_context", team_context)
-                        execution.events.append(
-                            {
-                                "type": "team_context_shared",
-                                "subtask_id": subtask.id,
-                                "agent": agent_name,
-                                "messages_so_far": len(team_context.messages),
-                            }
-                        )
-                    self.agents[agent_name].execute_subtask(subtask)
-                    if subtask.status == TaskStatus.COMPLETED:
-                        execution.events.append(
-                            {
-                                "type": "subtask_completed",
-                                "subtask_id": subtask.id,
-                                "agent": agent_name,
-                            }
-                        )
-                    elif subtask.status == TaskStatus.FAILED:
-                        execution.events.append(
-                            {
-                                "type": "subtask_failed",
-                                "subtask_id": subtask.id,
-                                "agent": agent_name,
-                                "reason": subtask.error,
-                            }
-                        )
-                    if subtask.status == TaskStatus.COMPLETED and self.on_task_completed is not None:
-                        hook_result = self.on_task_completed(subtask)
-                        subtask.metadata["on_task_completed"] = {
-                            "allow": hook_result.allow,
-                            "message": hook_result.message,
-                        }
-                        if not hook_result.allow:
-                            reason = hook_result.message or "Subtask rejected by on_task_completed hook"
-                            subtask.error = reason
-                            subtask.status = self.on_task_completed_rejection_status
-                            if self.on_task_completed_rejection_status == TaskStatus.PENDING:
-                                subtask.metadata["completion_rejected_pending"] = True
-                made_progress = True
-
-            if not made_progress:
-                break
-
+        metrics.total_elapsed_ms = (datetime.now(timezone.utc) - start).total_seconds() * 1000
+        execution.metrics = metrics.as_dict()
         execution.events.append({"type": "execution_finished", "status": execution.status.value})
 
         return execution

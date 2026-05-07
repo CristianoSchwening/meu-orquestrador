@@ -1,5 +1,16 @@
-from workforce import Workforce, Toolkit, Agent, Subtask, TaskStatus, HookResult, ExecutionMode
-from workforce import TaskBoard
+from workforce import (
+    Workforce,
+    Toolkit,
+    Agent,
+    Subtask,
+    TaskStatus,
+    HookResult,
+    ExecutionMode,
+    ExecutionPattern,
+    ExecutionBudget,
+    CriticResult,
+    TaskBoard,
+)
 from threading import Thread, Lock
 import time
 
@@ -22,6 +33,15 @@ class MarkerTool:
     name = "mark"
 
     def run(self, **kwargs):
+        kwargs["calls"].append(kwargs["name"])
+        return kwargs["name"]
+
+
+class SlowMarkerTool:
+    name = "slow_mark"
+
+    def run(self, **kwargs):
+        time.sleep(kwargs.get("delay", 0.05))
         kwargs["calls"].append(kwargs["name"])
         return kwargs["name"]
 
@@ -233,7 +253,9 @@ def test_execution_mode_team_shares_context_and_records_events():
     assert result.mode == ExecutionMode.TEAM
     assert read.output == ["hello"]
     assert any(event["type"] == "team_context_shared" for event in result.events)
-    assert result.events[0] == {"type": "execution_started", "mode": "team"}
+    assert result.events[0]["type"] == "execution_started"
+    assert result.events[0]["mode"] == "team"
+    assert result.events[0]["pattern"] == "sequential"
     assert result.events[-1]["type"] == "execution_finished"
 
 
@@ -340,3 +362,290 @@ def test_decision_metadata_parallel_plan_recommends_more_agents():
     assert result.decision_metadata["recommended_agents"] >= 2
     assert result.decision_metadata["parallelism_worth_it"] is True
     assert result.decision_metadata["independent_subtasks"] == 3
+
+
+def test_execution_pattern_parallel_runs_independent_tasks_concurrently():
+    toolkit = Toolkit()
+    toolkit.register(SlowMarkerTool())
+    calls = []
+    order = []
+
+    def slow_router(subtask: Subtask) -> str:
+        return subtask.id.lower()
+
+    workforce = Workforce(
+        planner=lambda _: [
+            Subtask(id="A", description="a", tool_name="slow_mark", params={"calls": calls, "name": "A", "delay": 0.05}),
+            Subtask(id="B", description="b", tool_name="slow_mark", params={"calls": calls, "name": "B", "delay": 0.05}),
+            Subtask(id="C", description="c", tool_name="slow_mark", params={"calls": calls, "name": "C", "delay": 0.05}),
+        ],
+        agents={
+            "a": Agent(name="a", toolkit=toolkit),
+            "b": Agent(name="b", toolkit=toolkit),
+            "c": Agent(name="c", toolkit=toolkit),
+        },
+        task_router=slow_router,
+        execution_pattern=ExecutionPattern.PARALLEL,
+    )
+
+    t0 = time.time()
+    result = workforce.execute(task_id="t-parallel-pattern", objective="run")
+    elapsed = time.time() - t0
+
+    assert result.status == TaskStatus.COMPLETED
+    assert set(calls) == {"A", "B", "C"}
+    assert elapsed < 0.25, "Parallel tasks should finish faster than sequential (3 * 0.05s)"
+    assert result.events[0]["pattern"] == "parallel"
+
+
+def test_execution_pattern_review_critic_approves_on_pass():
+    toolkit = Toolkit()
+    toolkit.register(SumTool())
+
+    def approving_critic(subtask: Subtask) -> CriticResult:
+        return CriticResult(approved=True, score=1.0, feedback="looks good")
+
+    workforce = Workforce(
+        planner=lambda _: [Subtask(id="A", description="a", tool_name="sum", params={"a": 2, "b": 3})],
+        agents={"main": Agent(name="main", toolkit=toolkit)},
+        task_router=router,
+        execution_pattern=ExecutionPattern.REVIEW_CRITIC,
+        critic=approving_critic,
+    )
+
+    result = workforce.execute(task_id="t-critic-pass", objective="run")
+
+    assert result.status == TaskStatus.COMPLETED
+    assert result.subtasks[0].output == 5
+    assert result.subtasks[0].quality_score == 1.0
+    assert result.subtasks[0].critic_feedback == "looks good"
+    assert result.subtasks[0].metadata["critic"]["approved"] is True
+    assert result.metrics["critic_rejections"] == 0
+
+
+def test_execution_pattern_review_critic_retries_on_rejection_then_exhausts():
+    toolkit = Toolkit()
+    toolkit.register(SumTool())
+    critic_calls = []
+
+    def always_reject(subtask: Subtask) -> CriticResult:
+        critic_calls.append(subtask.id)
+        return CriticResult(approved=False, score=0.2, feedback="not good enough")
+
+    workforce = Workforce(
+        planner=lambda _: [Subtask(id="A", description="a", tool_name="sum", params={"a": 1, "b": 1})],
+        agents={"main": Agent(name="main", toolkit=toolkit)},
+        task_router=router,
+        execution_pattern=ExecutionPattern.REVIEW_CRITIC,
+        critic=always_reject,
+        budget=ExecutionBudget(max_iterations=2),
+    )
+
+    result = workforce.execute(task_id="t-critic-exhaust", objective="run")
+
+    assert result.subtasks[0].status == TaskStatus.FAILED
+    assert "Critic rejected after" in (result.subtasks[0].error or "")
+    assert result.metrics["critic_rejections"] >= 1
+    assert result.subtasks[0].attempt == 2
+    retry_events = [e for e in result.events if e["type"] == "subtask_retry"]
+    assert len(retry_events) == 2
+
+
+def test_execution_pattern_review_critic_quality_threshold_auto_approves():
+    toolkit = Toolkit()
+    toolkit.register(SumTool())
+
+    def borderline_critic(subtask: Subtask) -> CriticResult:
+        return CriticResult(approved=False, score=0.8, feedback="borderline")
+
+    workforce = Workforce(
+        planner=lambda _: [Subtask(id="A", description="a", tool_name="sum", params={"a": 1, "b": 1})],
+        agents={"main": Agent(name="main", toolkit=toolkit)},
+        task_router=router,
+        execution_pattern=ExecutionPattern.REVIEW_CRITIC,
+        critic=borderline_critic,
+        budget=ExecutionBudget(quality_threshold=0.75),
+    )
+
+    result = workforce.execute(task_id="t-critic-threshold", objective="run")
+
+    assert result.status == TaskStatus.COMPLETED
+    assert result.subtasks[0].quality_score == 0.8
+    assert result.metrics["critic_rejections"] == 0
+
+
+def test_execution_pattern_iterative_refinement_cycles_until_approved():
+    toolkit = Toolkit()
+    toolkit.register(SumTool())
+    calls = [0]
+
+    def improving_critic(subtask: Subtask) -> CriticResult:
+        calls[0] += 1
+        if calls[0] < 3:
+            return CriticResult(approved=False, score=0.4, feedback="needs improvement")
+        return CriticResult(approved=True, score=1.0, feedback="approved")
+
+    workforce = Workforce(
+        planner=lambda _: [Subtask(id="A", description="a", tool_name="sum", params={"a": 1, "b": 1})],
+        agents={"main": Agent(name="main", toolkit=toolkit)},
+        task_router=router,
+        execution_pattern=ExecutionPattern.ITERATIVE_REFINEMENT,
+        critic=improving_critic,
+        budget=ExecutionBudget(max_iterations=5),
+    )
+
+    result = workforce.execute(task_id="t-iterative", objective="run")
+
+    assert result.status == TaskStatus.COMPLETED
+    assert result.metrics["iterations"] > 0
+    refinement_events = [e for e in result.events if e["type"] == "refinement_cycle"]
+    assert len(refinement_events) >= 1
+
+
+def test_execution_pattern_iterative_refinement_stops_at_max_iterations():
+    toolkit = Toolkit()
+    toolkit.register(SumTool())
+
+    def always_reject(subtask: Subtask) -> CriticResult:
+        return CriticResult(approved=False, score=0.1, feedback="never good")
+
+    workforce = Workforce(
+        planner=lambda _: [Subtask(id="A", description="a", tool_name="sum", params={"a": 1, "b": 1})],
+        agents={"main": Agent(name="main", toolkit=toolkit)},
+        task_router=router,
+        execution_pattern=ExecutionPattern.ITERATIVE_REFINEMENT,
+        critic=always_reject,
+        budget=ExecutionBudget(max_iterations=2),
+    )
+
+    result = workforce.execute(task_id="t-iterative-max", objective="run")
+
+    assert any(e["type"] == "max_iterations_reached" for e in result.events)
+    assert result.metrics["iterations"] == 2
+
+
+def test_execution_pattern_human_in_the_loop_approves():
+    toolkit = Toolkit()
+    toolkit.register(SumTool())
+
+    workforce = Workforce(
+        planner=lambda _: [Subtask(id="A", description="a", tool_name="sum", params={"a": 3, "b": 4})],
+        agents={"main": Agent(name="main", toolkit=toolkit)},
+        task_router=router,
+        execution_pattern=ExecutionPattern.HUMAN_IN_THE_LOOP,
+        human_approval_gate=lambda _: True,
+    )
+
+    result = workforce.execute(task_id="t-human-approve", objective="run")
+
+    assert result.status == TaskStatus.COMPLETED
+    assert result.subtasks[0].metadata["human_approval"]["approved"] is True
+    assert any(e["type"] == "subtask_human_approved" for e in result.events)
+
+
+def test_execution_pattern_human_in_the_loop_rejects():
+    toolkit = Toolkit()
+    toolkit.register(SumTool())
+
+    workforce = Workforce(
+        planner=lambda _: [Subtask(id="A", description="a", tool_name="sum", params={"a": 3, "b": 4})],
+        agents={"main": Agent(name="main", toolkit=toolkit)},
+        task_router=router,
+        execution_pattern=ExecutionPattern.HUMAN_IN_THE_LOOP,
+        human_approval_gate=lambda _: False,
+    )
+
+    result = workforce.execute(task_id="t-human-reject", objective="run")
+
+    assert result.subtasks[0].status == TaskStatus.FAILED
+    assert result.subtasks[0].error == "Rejected by human approval gate"
+    assert any(e["type"] == "subtask_human_rejected" for e in result.events)
+
+
+def test_budget_max_model_calls_stops_execution():
+    toolkit = Toolkit()
+    toolkit.register(SumTool())
+
+    workforce = Workforce(
+        planner=lambda _: [
+            Subtask(id="A", description="a", tool_name="sum", params={"a": 1, "b": 1}),
+            Subtask(id="B", description="b", tool_name="sum", params={"a": 2, "b": 2}),
+            Subtask(id="C", description="c", tool_name="sum", params={"a": 3, "b": 3}),
+        ],
+        agents={"main": Agent(name="main", toolkit=toolkit)},
+        task_router=router,
+        budget=ExecutionBudget(max_model_calls=1),
+    )
+
+    result = workforce.execute(task_id="t-budget-calls", objective="run")
+
+    assert result.metrics["model_calls"] <= 1
+    assert any(e["type"] == "budget_exceeded" for e in result.events)
+
+
+def test_budget_max_elapsed_ms_stops_execution():
+    toolkit = Toolkit()
+    toolkit.register(SlowMarkerTool())
+    calls = []
+
+    workforce = Workforce(
+        planner=lambda _: [
+            Subtask(id="A", description="a", tool_name="slow_mark", params={"calls": calls, "name": "A", "delay": 0.2}),
+            Subtask(id="B", description="b", tool_name="slow_mark", params={"calls": calls, "name": "B", "delay": 0.2}),
+        ],
+        agents={"main": Agent(name="main", toolkit=toolkit)},
+        task_router=router,
+        budget=ExecutionBudget(max_elapsed_ms=150),
+    )
+
+    result = workforce.execute(task_id="t-budget-elapsed", objective="run")
+
+    assert any(e["type"] == "budget_exceeded" for e in result.events)
+    assert len(calls) <= 1
+
+
+def test_metrics_track_latency_and_model_calls():
+    toolkit = Toolkit()
+    toolkit.register(SumTool())
+
+    task_a = Subtask(id="A", description="a", tool_name="sum", params={"a": 1, "b": 1})
+    task_b = Subtask(id="B", description="b", tool_name="sum", params={"a": 2, "b": 2})
+
+    workforce = Workforce(
+        planner=lambda _: [task_a, task_b],
+        agents={"main": Agent(name="main", toolkit=toolkit)},
+        task_router=router,
+    )
+
+    result = workforce.execute(task_id="t-metrics", objective="run")
+
+    assert result.metrics["model_calls"] == 2
+    assert result.metrics["total_elapsed_ms"] >= 0
+    assert "A" in result.metrics["subtask_latencies"]
+    assert "B" in result.metrics["subtask_latencies"]
+    assert result.metrics["subtask_latencies"]["A"] >= 0
+
+
+def test_subtask_tracks_attempt_and_timing_fields():
+    toolkit = Toolkit()
+    toolkit.register(SumTool())
+
+    subtask = Subtask(id="A", description="a", tool_name="sum", params={"a": 1, "b": 1})
+
+    assert subtask.attempt == 0
+    assert subtask.quality_score is None
+    assert subtask.critic_feedback is None
+    assert subtask.started_at is None
+    assert subtask.completed_at is None
+
+    workforce = Workforce(
+        planner=lambda _: [subtask],
+        agents={"main": Agent(name="main", toolkit=toolkit)},
+        task_router=router,
+    )
+
+    workforce.execute(task_id="t-fields", objective="run")
+
+    assert subtask.started_at is not None
+    assert subtask.completed_at is not None
+    assert subtask.completed_at >= subtask.started_at
