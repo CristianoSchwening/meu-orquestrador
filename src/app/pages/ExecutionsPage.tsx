@@ -8,8 +8,8 @@ import {
   Loader2,
   XCircle,
   Clock,
-  Users,
   Cpu,
+  ShieldAlert,
 } from 'lucide-react'
 import { StatusBadge } from '../components/shared/StatusBadge'
 import { Button } from '../components/ui/button'
@@ -163,7 +163,15 @@ export default function ExecutionsPage() {
                         <p className="text-xs text-slate-400 truncate max-w-[280px] mt-0.5">{exec.objective}</p>
                       </td>
                       <td className="px-3 py-3.5">
-                        <StatusBadge status={status} size="sm" />
+                        <div className="flex flex-col gap-1 items-start">
+                          <StatusBadge status={status} size="sm" />
+                          {exec.approval_requests?.some((r) => r.status === 'pending') && (
+                            <span className="inline-flex items-center gap-1 text-[10px] font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-1.5 py-0.5">
+                              <ShieldAlert className="size-2.5" />
+                              Aguardando aprovação
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="px-3 py-3.5">
                         <span className="text-xs bg-slate-100 text-slate-600 rounded px-2 py-0.5">
