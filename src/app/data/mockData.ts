@@ -1,0 +1,638 @@
+import type {
+  Agent,
+  Tool,
+  WorkforceExecution,
+  Subtask,
+  ExecutionEvent,
+  WorkforceConfig,
+  PlaygroundScenario,
+} from '../types/workforce'
+
+// ─── Agents ──────────────────────────────────────────────────────────────────
+
+export const MOCK_AGENTS: Agent[] = [
+  {
+    id: 'browser-agent',
+    name: 'Browser Agent',
+    description: 'Navega na web, captura screenshots e interage com interfaces web.',
+    tags: ['Web Browser', 'Search Engines', 'Screen Capture'],
+    toolkit: ['web_browse', 'web_search', 'screenshot', 'click', 'type_text'],
+    max_concurrent: 2,
+    color: '#f97316',
+    avatar: 'B',
+  },
+  {
+    id: 'developer-agent',
+    name: 'Developer Agent',
+    description: 'Executa código, acessa terminal e realiza operações de sistema.',
+    tags: ['Terminal', 'Shell', 'Code Exec'],
+    toolkit: ['terminal', 'shell', 'code_exec', 'file_read', 'file_write'],
+    max_concurrent: 3,
+    color: '#3b82f6',
+    avatar: 'D',
+  },
+  {
+    id: 'document-agent',
+    name: 'Document Agent',
+    description: 'Processa documentos, gera relatórios e cria visualizações de dados.',
+    tags: ['File Management', 'Data Processing', 'Document Creation'],
+    toolkit: ['file_read', 'file_write', 'data_analysis', 'chart_gen', 'pdf_gen'],
+    max_concurrent: 2,
+    color: '#8b5cf6',
+    avatar: 'Doc',
+  },
+  {
+    id: 'analyst-agent',
+    name: 'Analyst Agent',
+    description: 'Analisa dados, identifica padrões e produz insights detalhados.',
+    tags: ['Data Analysis', 'Statistics', 'Insights'],
+    toolkit: ['data_analysis', 'sql_query', 'chart_gen', 'report_gen'],
+    max_concurrent: 2,
+    color: '#10b981',
+    avatar: 'A',
+  },
+  {
+    id: 'reviewer-agent',
+    name: 'Reviewer Agent',
+    description: 'Revisa outputs de outros agentes, aplica critério de qualidade.',
+    tags: ['Quality', 'Review', 'Critic'],
+    toolkit: ['review', 'score', 'feedback'],
+    max_concurrent: 1,
+    color: '#ec4899',
+    avatar: 'R',
+  },
+]
+
+// ─── Tools ───────────────────────────────────────────────────────────────────
+
+export const MOCK_TOOLS: Tool[] = [
+  {
+    name: 'web_browse',
+    description: 'Navega para uma URL e retorna o conteúdo da página.',
+    category: 'Web',
+    params: [
+      { name: 'url', type: 'string', required: true },
+      { name: 'wait_for', type: 'string', required: false },
+    ],
+  },
+  {
+    name: 'web_search',
+    description: 'Realiza buscas na web e retorna resultados relevantes.',
+    category: 'Web',
+    params: [
+      { name: 'query', type: 'string', required: true },
+      { name: 'num_results', type: 'number', required: false },
+    ],
+  },
+  {
+    name: 'screenshot',
+    description: 'Captura screenshot da tela ou de um elemento específico.',
+    category: 'Web',
+    params: [
+      { name: 'selector', type: 'string', required: false },
+      { name: 'full_page', type: 'boolean', required: false },
+    ],
+  },
+  {
+    name: 'terminal',
+    description: 'Executa comandos no terminal do sistema.',
+    category: 'Shell',
+    params: [
+      { name: 'command', type: 'string', required: true },
+      { name: 'timeout', type: 'number', required: false },
+    ],
+  },
+  {
+    name: 'code_exec',
+    description: 'Executa código Python ou JavaScript em sandbox isolado.',
+    category: 'Code',
+    params: [
+      { name: 'code', type: 'string', required: true },
+      { name: 'language', type: 'string', required: false },
+    ],
+  },
+  {
+    name: 'file_read',
+    description: 'Lê o conteúdo de um arquivo do sistema de arquivos.',
+    category: 'Files',
+    params: [
+      { name: 'path', type: 'string', required: true },
+      { name: 'encoding', type: 'string', required: false },
+    ],
+  },
+  {
+    name: 'file_write',
+    description: 'Escreve ou cria um arquivo no sistema de arquivos.',
+    category: 'Files',
+    params: [
+      { name: 'path', type: 'string', required: true },
+      { name: 'content', type: 'string', required: true },
+    ],
+  },
+  {
+    name: 'data_analysis',
+    description: 'Analisa um conjunto de dados e retorna estatísticas e insights.',
+    category: 'Analysis',
+    params: [
+      { name: 'data', type: 'object', required: true },
+      { name: 'metrics', type: 'array', required: false },
+    ],
+  },
+  {
+    name: 'chart_gen',
+    description: 'Gera gráficos e visualizações a partir de dados estruturados.',
+    category: 'Visualization',
+    params: [
+      { name: 'data', type: 'object', required: true },
+      { name: 'chart_type', type: 'string', required: true },
+      { name: 'title', type: 'string', required: false },
+    ],
+  },
+  {
+    name: 'pdf_gen',
+    description: 'Gera documentos PDF a partir de conteúdo HTML ou Markdown.',
+    category: 'Documents',
+    params: [
+      { name: 'content', type: 'string', required: true },
+      { name: 'filename', type: 'string', required: false },
+    ],
+  },
+  {
+    name: 'sql_query',
+    description: 'Executa queries SQL em banco de dados configurado.',
+    category: 'Database',
+    params: [
+      { name: 'query', type: 'string', required: true },
+      { name: 'database', type: 'string', required: false },
+    ],
+  },
+]
+
+// ─── Mock Executions ─────────────────────────────────────────────────────────
+
+function makeEvent(
+  type: string,
+  overrides: Partial<ExecutionEvent> = {}
+): ExecutionEvent {
+  return {
+    id: Math.random().toString(36).slice(2),
+    type,
+    timestamp: new Date(Date.now() - Math.random() * 60000).toISOString(),
+    ...overrides,
+  }
+}
+
+function makeSubtask(
+  overrides: Partial<Subtask> & Pick<Subtask, 'id' | 'description' | 'tool_name' | 'claimed_by'>
+): Subtask {
+  return {
+    params: {},
+    depends_on: [],
+    blocked_reason: null,
+    status: 'completed',
+    output: null,
+    error: null,
+    claimed_at: new Date(Date.now() - 30000).toISOString(),
+    metadata: {},
+    attempt: 0,
+    parent_subtask_id: null,
+    quality_score: null,
+    critic_feedback: null,
+    started_at: new Date(Date.now() - 25000).toISOString(),
+    completed_at: new Date(Date.now() - 10000).toISOString(),
+    ...overrides,
+  }
+}
+
+export const MOCK_EXECUTIONS: WorkforceExecution[] = [
+  {
+    task_id: 'exec-001',
+    task_name: 'Ticket Automation',
+    objective:
+      'Go to my ticket management system, check the tickets, add new tickets from local files, and generate a statistical report.',
+    mode: 'subagent',
+    pattern: 'parallel',
+    agent_ids: ['browser-agent', 'developer-agent', 'document-agent'],
+    created_at: new Date(Date.now() - 120000).toISOString(),
+    updated_at: new Date(Date.now() - 5000).toISOString(),
+    decision_metadata: {
+      recommended_agents: 3,
+      estimated_overhead: 0.42,
+      independent_subtasks: 3,
+      dependency_depth: 2,
+      resource_conflict_score: 0.17,
+      parallelism_worth_it: true,
+    },
+    metrics: {
+      total_elapsed_ms: 115234,
+      model_calls: 12,
+      iterations: 1,
+      critic_rejections: 0,
+      subtask_latencies: {
+        'st-001': 18432,
+        'st-002': 21876,
+        'st-003': 9854,
+        'st-004': 14221,
+        'st-005': 32541,
+      },
+    },
+    subtasks: [
+      makeSubtask({
+        id: 'st-001',
+        description: 'Access ticket management system and document current state with screenshot.',
+        tool_name: 'web_browse',
+        claimed_by: 'browser-agent',
+        status: 'completed',
+        quality_score: 0.95,
+        output: 'Successfully navigated to http://localhost:9229/mock_website.html. Found 12 existing tickets.',
+      }),
+      makeSubtask({
+        id: 'st-002',
+        description: 'Read all ticket files from the local directory /Users/new_tickets.',
+        tool_name: 'file_read',
+        claimed_by: 'developer-agent',
+        depends_on: [],
+        status: 'completed',
+        quality_score: 0.98,
+        output: 'Read 5 ticket files. Compiled structured JSON with title, description, priority, status.',
+      }),
+      makeSubtask({
+        id: 'st-003',
+        description: 'Navigate to ticket creation form and add each new ticket.',
+        tool_name: 'web_browse',
+        claimed_by: 'browser-agent',
+        depends_on: ['st-001', 'st-002'],
+        status: 'completed',
+        quality_score: 0.91,
+        output: 'Successfully added 5 new tickets. All confirmed in the system.',
+      }),
+      makeSubtask({
+        id: 'st-004',
+        description: 'Validate all ticket data as structured JSON format.',
+        tool_name: 'code_exec',
+        claimed_by: 'developer-agent',
+        depends_on: ['st-002'],
+        status: 'completed',
+        quality_score: 0.99,
+        output: 'Validation passed. All 5 tickets have required fields: ID, title, description, priority, status.',
+      }),
+      makeSubtask({
+        id: 'st-005',
+        description: 'Generate comprehensive statistical report with charts and visualizations.',
+        tool_name: 'chart_gen',
+        claimed_by: 'document-agent',
+        depends_on: ['st-003'],
+        status: 'completed',
+        quality_score: 0.87,
+        output: 'Generated HTML report with bar chart (status distribution), pie chart (priority), line chart (trends).',
+      }),
+    ],
+    events: [
+      makeEvent('execution_started', { mode: 'subagent', pattern: 'parallel', timestamp: new Date(Date.now() - 120000).toISOString() }),
+      makeEvent('subtask_completed', { subtask_id: 'st-001', agent: 'browser-agent', timestamp: new Date(Date.now() - 101000).toISOString() }),
+      makeEvent('subtask_completed', { subtask_id: 'st-002', agent: 'developer-agent', timestamp: new Date(Date.now() - 98000).toISOString() }),
+      makeEvent('subtask_completed', { subtask_id: 'st-004', agent: 'developer-agent', timestamp: new Date(Date.now() - 84000).toISOString() }),
+      makeEvent('subtask_completed', { subtask_id: 'st-003', agent: 'browser-agent', timestamp: new Date(Date.now() - 70000).toISOString() }),
+      makeEvent('subtask_completed', { subtask_id: 'st-005', agent: 'document-agent', timestamp: new Date(Date.now() - 5000).toISOString() }),
+      makeEvent('execution_finished', { status: 'completed', timestamp: new Date(Date.now() - 5000).toISOString() }),
+    ],
+  },
+  {
+    task_id: 'exec-002',
+    task_name: 'Code Review Analysis',
+    objective: 'Analyze the codebase, identify code smells, run tests and generate a detailed review report.',
+    mode: 'team',
+    pattern: 'review_critic',
+    agent_ids: ['developer-agent', 'reviewer-agent', 'document-agent'],
+    created_at: new Date(Date.now() - 600000).toISOString(),
+    updated_at: new Date(Date.now() - 300000).toISOString(),
+    decision_metadata: {
+      recommended_agents: 2,
+      estimated_overhead: 0.68,
+      independent_subtasks: 2,
+      dependency_depth: 3,
+      resource_conflict_score: 0.25,
+      parallelism_worth_it: false,
+    },
+    metrics: {
+      total_elapsed_ms: 287430,
+      model_calls: 18,
+      iterations: 2,
+      critic_rejections: 1,
+      subtask_latencies: {
+        'st-010': 45230,
+        'st-011': 38120,
+        'st-012': 62450,
+        'st-013': 91230,
+      },
+    },
+    subtasks: [
+      makeSubtask({
+        id: 'st-010',
+        description: 'Run static analysis tools on the codebase.',
+        tool_name: 'terminal',
+        claimed_by: 'developer-agent',
+        status: 'completed',
+        quality_score: 0.92,
+      }),
+      makeSubtask({
+        id: 'st-011',
+        description: 'Execute test suite and collect coverage report.',
+        tool_name: 'code_exec',
+        claimed_by: 'developer-agent',
+        depends_on: ['st-010'],
+        status: 'completed',
+        quality_score: 0.89,
+        attempt: 1,
+        critic_feedback: 'First attempt missed edge case tests. Rerun with full suite.',
+      }),
+      makeSubtask({
+        id: 'st-012',
+        description: 'Review findings and score code quality.',
+        tool_name: 'review',
+        claimed_by: 'reviewer-agent',
+        depends_on: ['st-011'],
+        status: 'completed',
+        quality_score: 0.94,
+      }),
+      makeSubtask({
+        id: 'st-013',
+        description: 'Generate comprehensive code review report with recommendations.',
+        tool_name: 'pdf_gen',
+        claimed_by: 'document-agent',
+        depends_on: ['st-012'],
+        status: 'completed',
+        quality_score: 0.96,
+      }),
+    ],
+    events: [
+      makeEvent('execution_started', { mode: 'team', pattern: 'review_critic', timestamp: new Date(Date.now() - 600000).toISOString() }),
+      makeEvent('subtask_completed', { subtask_id: 'st-010', agent: 'developer-agent', timestamp: new Date(Date.now() - 554000).toISOString() }),
+      makeEvent('subtask_retry', { subtask_id: 'st-011', attempt: 1, critic_feedback: 'Missing edge case tests.', timestamp: new Date(Date.now() - 515000).toISOString() }),
+      makeEvent('subtask_completed', { subtask_id: 'st-011', agent: 'developer-agent', timestamp: new Date(Date.now() - 476000).toISOString() }),
+      makeEvent('subtask_completed', { subtask_id: 'st-012', agent: 'reviewer-agent', timestamp: new Date(Date.now() - 413000).toISOString() }),
+      makeEvent('subtask_completed', { subtask_id: 'st-013', agent: 'document-agent', timestamp: new Date(Date.now() - 300000).toISOString() }),
+      makeEvent('execution_finished', { status: 'completed', timestamp: new Date(Date.now() - 300000).toISOString() }),
+    ],
+  },
+  {
+    task_id: 'exec-003',
+    task_name: 'Data Pipeline Sync',
+    objective: 'Sync data from external API, validate records, and update database.',
+    mode: 'subagent',
+    pattern: 'sequential',
+    agent_ids: ['developer-agent', 'analyst-agent'],
+    created_at: new Date(Date.now() - 30000).toISOString(),
+    updated_at: new Date(Date.now() - 2000).toISOString(),
+    decision_metadata: {
+      recommended_agents: 2,
+      estimated_overhead: 0.31,
+      independent_subtasks: 1,
+      dependency_depth: 4,
+      resource_conflict_score: 0.0,
+      parallelism_worth_it: false,
+    },
+    metrics: {
+      total_elapsed_ms: 28000,
+      model_calls: 6,
+      iterations: 1,
+      critic_rejections: 0,
+      subtask_latencies: {
+        'st-020': 8200,
+        'st-021': 12400,
+      },
+    },
+    subtasks: [
+      makeSubtask({
+        id: 'st-020',
+        description: 'Fetch records from external API endpoint.',
+        tool_name: 'web_browse',
+        claimed_by: 'developer-agent',
+        status: 'completed',
+        quality_score: 1.0,
+      }),
+      makeSubtask({
+        id: 'st-021',
+        description: 'Validate and transform data records.',
+        tool_name: 'code_exec',
+        claimed_by: 'developer-agent',
+        depends_on: ['st-020'],
+        status: 'running',
+        output: null,
+        completed_at: null,
+      }),
+      makeSubtask({
+        id: 'st-022',
+        description: 'Analyze data quality and flag anomalies.',
+        tool_name: 'data_analysis',
+        claimed_by: null,
+        depends_on: ['st-021'],
+        status: 'pending',
+        output: null,
+        completed_at: null,
+      }),
+      makeSubtask({
+        id: 'st-023',
+        description: 'Update database with validated records.',
+        tool_name: 'sql_query',
+        claimed_by: null,
+        depends_on: ['st-022'],
+        status: 'pending',
+        output: null,
+        completed_at: null,
+      }),
+    ],
+    events: [
+      makeEvent('execution_started', { mode: 'subagent', pattern: 'sequential', timestamp: new Date(Date.now() - 30000).toISOString() }),
+      makeEvent('subtask_completed', { subtask_id: 'st-020', agent: 'developer-agent', timestamp: new Date(Date.now() - 21800).toISOString() }),
+    ],
+  },
+  {
+    task_id: 'exec-004',
+    task_name: 'Market Research Report',
+    objective: 'Search for competitor analysis, scrape pricing data, and produce executive summary.',
+    mode: 'subagent',
+    pattern: 'parallel',
+    agent_ids: ['browser-agent', 'analyst-agent', 'document-agent'],
+    created_at: new Date(Date.now() - 3600000).toISOString(),
+    updated_at: new Date(Date.now() - 3400000).toISOString(),
+    decision_metadata: {
+      recommended_agents: 3,
+      estimated_overhead: 0.55,
+      independent_subtasks: 3,
+      dependency_depth: 2,
+      resource_conflict_score: 0.33,
+      parallelism_worth_it: true,
+    },
+    metrics: {
+      total_elapsed_ms: 198320,
+      model_calls: 9,
+      iterations: 1,
+      critic_rejections: 0,
+      subtask_latencies: {
+        'st-030': 55200,
+        'st-031': 48900,
+        'st-032': 72100,
+      },
+    },
+    subtasks: [
+      makeSubtask({ id: 'st-030', description: 'Scrape competitor pricing pages.', tool_name: 'web_browse', claimed_by: 'browser-agent', status: 'failed', error: 'Rate limit exceeded on target site after 3 attempts.' }),
+      makeSubtask({ id: 'st-031', description: 'Search for market share reports.', tool_name: 'web_search', claimed_by: 'browser-agent', status: 'failed', error: 'Search API quota exhausted.' }),
+      makeSubtask({ id: 'st-032', description: 'Generate executive summary report.', tool_name: 'pdf_gen', claimed_by: 'document-agent', depends_on: ['st-030', 'st-031'], status: 'blocked', blocked_reason: 'Blocked by failed dependencies: st-030, st-031' }),
+    ],
+    events: [
+      makeEvent('execution_started', { mode: 'subagent', pattern: 'parallel', timestamp: new Date(Date.now() - 3600000).toISOString() }),
+      makeEvent('subtask_failed', { subtask_id: 'st-030', agent: 'browser-agent', reason: 'Rate limit exceeded', timestamp: new Date(Date.now() - 3544000).toISOString() }),
+      makeEvent('subtask_failed', { subtask_id: 'st-031', agent: 'browser-agent', reason: 'API quota exhausted', timestamp: new Date(Date.now() - 3551000).toISOString() }),
+      makeEvent('execution_finished', { status: 'failed', timestamp: new Date(Date.now() - 3400000).toISOString() }),
+    ],
+  },
+]
+
+// ─── Workforce Configs ────────────────────────────────────────────────────────
+
+export const MOCK_CONFIGS: WorkforceConfig[] = [
+  {
+    id: 'cfg-001',
+    name: 'Web Research Pipeline',
+    agent_ids: ['browser-agent', 'analyst-agent', 'document-agent'],
+    execution_mode: 'subagent',
+    execution_pattern: 'parallel',
+    budget: { max_iterations: 5, max_model_calls: 20, max_elapsed_ms: 300000, quality_threshold: 0.8 },
+    has_critic: true,
+    has_human_gate: false,
+    has_dynamic_router: true,
+    created_at: new Date(Date.now() - 86400000).toISOString(),
+  },
+  {
+    id: 'cfg-002',
+    name: 'Code Review with Human Approval',
+    agent_ids: ['developer-agent', 'reviewer-agent'],
+    execution_mode: 'team',
+    execution_pattern: 'human_in_the_loop',
+    budget: { max_iterations: 3, max_model_calls: 15, max_elapsed_ms: null, quality_threshold: 0.9 },
+    has_critic: true,
+    has_human_gate: true,
+    has_dynamic_router: false,
+    created_at: new Date(Date.now() - 172800000).toISOString(),
+  },
+]
+
+// ─── Playground Scenarios ────────────────────────────────────────────────────
+
+export const PLAYGROUND_SCENARIOS: PlaygroundScenario[] = [
+  {
+    id: 'scenario-ticket',
+    name: 'Ticket Automation',
+    objective:
+      'Go to my ticket management system http://localhost:9229/mock_website.html, check the tickets need to be added in my local path /Users/enrei/Desktop/new_tickets, add all the new tickets into my system, then generate a detailed statistical report for all the tickets in the system. The report should include charts and diagrams for data visualization.',
+    agent_ids: ['browser-agent', 'developer-agent', 'document-agent'],
+    subtasks: [
+      {
+        id: 'pt-001',
+        description: 'Access ticket management system at http://localhost:9229/mock_website.html using a web browser. Take a screenshot of the current state of the system and document what tickets are currently visible. Save this information as a text summary describing the existing tickets in the system.',
+        tool_name: 'web_browse',
+        agent_id: 'browser-agent',
+        depends_on: [],
+      },
+      {
+        id: 'pt-002',
+        description: 'Read all ticket files from the local directory /Users/enrei/Desktop/new_tickets. Extract the ticket information from each file and compile a complete list of new tickets that need to be added to the system. Return the ticket data as a structured JSON format with all relevant ticket details.',
+        tool_name: 'file_read',
+        agent_id: 'developer-agent',
+        depends_on: [],
+      },
+      {
+        id: 'pt-003',
+        description: 'Using the ticket management system at http://localhost:9229/mock_website.html, add all the new tickets provided from the /Users/enrei/Desktop/new_tickets directory. Use web browser automation to navigate the interface, fill in ticket forms, and submit each new ticket. Confirm successful addition of each ticket by verifying they appear in the system.',
+        tool_name: 'web_browse',
+        agent_id: 'browser-agent',
+        depends_on: ['pt-001', 'pt-002'],
+      },
+      {
+        id: 'pt-004',
+        description: 'Generate a comprehensive statistical report for all tickets in the system using the provided ticket data. The report should include: 1) Summary statistics (total tickets, by status, by priority), 2) Data visualizations including bar charts for ticket status distribution, pie chart for priority breakdown, line chart for ticket creation trends over time, and 3) Key insights and recommendations.',
+        tool_name: 'chart_gen',
+        agent_id: 'document-agent',
+        depends_on: ['pt-003'],
+      },
+    ],
+    delays: [0, 200, 2800, 3200, 7500],
+  },
+  {
+    id: 'scenario-research',
+    name: 'Market Research',
+    objective:
+      'Search for top 5 competitors in the SaaS project management space, scrape their pricing pages, compile a comparison table and generate an executive summary report.',
+    agent_ids: ['browser-agent', 'analyst-agent', 'document-agent'],
+    subtasks: [
+      {
+        id: 'pr-001',
+        description: 'Search the web for top SaaS project management competitors and their pricing pages.',
+        tool_name: 'web_search',
+        agent_id: 'browser-agent',
+        depends_on: [],
+      },
+      {
+        id: 'pr-002',
+        description: 'Scrape pricing information from each identified competitor website.',
+        tool_name: 'web_browse',
+        agent_id: 'browser-agent',
+        depends_on: ['pr-001'],
+      },
+      {
+        id: 'pr-003',
+        description: 'Analyze pricing data and identify market patterns and positioning.',
+        tool_name: 'data_analysis',
+        agent_id: 'analyst-agent',
+        depends_on: ['pr-002'],
+      },
+      {
+        id: 'pr-004',
+        description: 'Generate executive summary report with comparison table and strategic recommendations.',
+        tool_name: 'pdf_gen',
+        agent_id: 'document-agent',
+        depends_on: ['pr-003'],
+      },
+    ],
+    delays: [0, 200, 4200, 8100, 12500],
+  },
+  {
+    id: 'scenario-code',
+    name: 'Code Review',
+    objective:
+      'Analyze the Python codebase in /src, run linting and tests, review code quality, and produce a detailed review report with prioritized recommendations.',
+    agent_ids: ['developer-agent', 'reviewer-agent', 'document-agent'],
+    subtasks: [
+      {
+        id: 'pc-001',
+        description: 'Run static analysis (pylint, flake8) and collect all warnings and errors.',
+        tool_name: 'terminal',
+        agent_id: 'developer-agent',
+        depends_on: [],
+      },
+      {
+        id: 'pc-002',
+        description: 'Execute test suite with pytest and collect code coverage report.',
+        tool_name: 'code_exec',
+        agent_id: 'developer-agent',
+        depends_on: ['pc-001'],
+      },
+      {
+        id: 'pc-003',
+        description: 'Review static analysis and test results, score code quality dimensions.',
+        tool_name: 'review',
+        agent_id: 'reviewer-agent',
+        depends_on: ['pc-002'],
+      },
+      {
+        id: 'pc-004',
+        description: 'Compile all findings into a comprehensive code review report with recommendations.',
+        tool_name: 'pdf_gen',
+        agent_id: 'document-agent',
+        depends_on: ['pc-003'],
+      },
+    ],
+    delays: [0, 200, 5100, 9400, 13800],
+  },
+]
