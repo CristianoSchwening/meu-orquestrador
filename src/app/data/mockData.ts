@@ -6,6 +6,7 @@ import type {
   ExecutionEvent,
   WorkforceConfig,
   PlaygroundScenario,
+  TeamMessage,
 } from '../types/workforce'
 
 // ─── Agents ──────────────────────────────────────────────────────────────────
@@ -374,6 +375,71 @@ export const MOCK_EXECUTIONS: WorkforceExecution[] = [
       makeEvent('subtask_completed', { subtask_id: 'st-013', agent: 'document-agent', timestamp: new Date(Date.now() - 300000).toISOString() }),
       makeEvent('execution_finished', { status: 'completed', timestamp: new Date(Date.now() - 300000).toISOString() }),
     ],
+    team_messages: [
+      {
+        id: 'tm-001',
+        sender: 'developer-agent',
+        content: 'Starting static analysis. Will publish findings to context once done.',
+        subtask_id: 'st-010',
+        timestamp: new Date(Date.now() - 598000).toISOString(),
+      },
+      {
+        id: 'tm-002',
+        sender: 'developer-agent',
+        content: 'Static analysis complete. Found 3 code smells: 2 long methods in auth.py, 1 god class in core/engine.py. Complexity score: 7.4.',
+        subtask_id: 'st-010',
+        timestamp: new Date(Date.now() - 554000).toISOString(),
+      },
+      {
+        id: 'tm-003',
+        sender: 'reviewer-agent',
+        content: 'Acknowledged findings. Noted the god class issue — that will likely affect the review score. Waiting for test results.',
+        subtask_id: null,
+        timestamp: new Date(Date.now() - 548000).toISOString(),
+      },
+      {
+        id: 'tm-004',
+        sender: 'developer-agent',
+        content: 'Running test suite now. First pass showed edge case failures in token validation module — rerunning with full coverage flags.',
+        subtask_id: 'st-011',
+        timestamp: new Date(Date.now() - 515000).toISOString(),
+      },
+      {
+        id: 'tm-005',
+        sender: 'reviewer-agent',
+        content: 'Confirmed. Edge case coverage is critical here — token expiry and refresh scenarios must be included.',
+        subtask_id: 'st-011',
+        timestamp: new Date(Date.now() - 510000).toISOString(),
+      },
+      {
+        id: 'tm-006',
+        sender: 'developer-agent',
+        content: 'Full test suite passed. Coverage: 87.3%. All token edge cases covered. Results published to context.',
+        subtask_id: 'st-011',
+        timestamp: new Date(Date.now() - 476000).toISOString(),
+      },
+      {
+        id: 'tm-007',
+        sender: 'reviewer-agent',
+        content: 'Review complete. Overall quality score: 0.94. Main issues: god class pattern in core/engine.py (high priority), 2 long methods (medium). All tests green. Approving with recommendations.',
+        subtask_id: 'st-012',
+        timestamp: new Date(Date.now() - 413000).toISOString(),
+      },
+      {
+        id: 'tm-008',
+        sender: 'document-agent',
+        content: 'Received full context — static analysis, test results, and review scores. Compiling final PDF report with all sections.',
+        subtask_id: 'st-013',
+        timestamp: new Date(Date.now() - 380000).toISOString(),
+      },
+      {
+        id: 'tm-009',
+        sender: 'document-agent',
+        content: 'Report generated: code_review_report.pdf (14 pages). Sections: Executive Summary, Static Analysis, Test Coverage, Quality Scores, Recommendations.',
+        subtask_id: 'st-013',
+        timestamp: new Date(Date.now() - 300000).toISOString(),
+      },
+    ] satisfies TeamMessage[],
   },
   {
     task_id: 'exec-003',

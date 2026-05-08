@@ -97,6 +97,7 @@ export interface WorkforceExecution {
   pattern: ExecutionPattern
   agent_ids: string[]
   events: ExecutionEvent[]
+  team_messages?: TeamMessage[]
   decision_metadata: DecisionMetadata
   metrics: ExecutionMetrics
   created_at: string

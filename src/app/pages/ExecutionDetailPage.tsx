@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { useParams, useNavigate } from 'react-router'
-import { ArrowLeft, LayoutGrid, GitBranch, Activity, MessageSquare, BarChart3, Info } from 'lucide-react'
+import { ArrowLeft, LayoutGrid, GitBranch, Activity, MessageSquare, BarChart3, Info, Users } from 'lucide-react'
 import { Button } from '../components/ui/button'
 import { StatusBadge } from '../components/shared/StatusBadge'
 import { KanbanBoard } from '../components/execution/KanbanBoard'
@@ -8,18 +8,25 @@ import { DAGViewer } from '../components/execution/DAGViewer'
 import { EventsLog } from '../components/execution/EventsLog'
 import { MetricsPanel } from '../components/execution/MetricsPanel'
 import { DecisionPanel } from '../components/execution/DecisionPanel'
+import { TeamContextFeed } from '../components/execution/TeamContextFeed'
 import { MOCK_EXECUTIONS, MOCK_AGENTS } from '../data/mockData'
 import type { TaskStatus, WorkforceExecution } from '../types/workforce'
 
-type Tab = 'kanban' | 'dag' | 'events' | 'metrics' | 'decision'
+type Tab = 'kanban' | 'dag' | 'events' | 'metrics' | 'decision' | 'team_context'
 
-const TABS: { id: Tab; label: string; icon: React.ElementType }[] = [
+const BASE_TABS: { id: Tab; label: string; icon: React.ElementType }[] = [
   { id: 'kanban', label: 'Task Board', icon: LayoutGrid },
   { id: 'dag', label: 'Grafo DAG', icon: GitBranch },
   { id: 'events', label: 'Eventos', icon: Activity },
   { id: 'metrics', label: 'Métricas', icon: BarChart3 },
   { id: 'decision', label: 'Decisão do Planner', icon: Info },
 ]
+
+const TEAM_TAB: { id: Tab; label: string; icon: React.ElementType } = {
+  id: 'team_context',
+  label: 'Team Context',
+  icon: Users,
+}
 
 function getOverallStatus(exec: WorkforceExecution): TaskStatus {
   if (exec.subtasks.every((s) => s.status === 'completed')) return 'completed'
@@ -64,6 +71,9 @@ export default function ExecutionDetailPage() {
   const status = getOverallStatus(exec)
   const completedCount = exec.subtasks.filter((s) => s.status === 'completed').length
   const progress = Math.round((completedCount / exec.subtasks.length) * 100)
+
+  const isTeamMode = exec.mode === 'team'
+  const TABS = isTeamMode ? [...BASE_TABS, TEAM_TAB] : BASE_TABS
 
   return (
     <div className="flex flex-col h-full">
@@ -171,6 +181,12 @@ export default function ExecutionDetailPage() {
           <div className="max-w-2xl">
             <DecisionPanel metadata={exec.decision_metadata} />
           </div>
+        )}
+        {activeTab === 'team_context' && (
+          <TeamContextFeed
+            messages={exec.team_messages ?? []}
+            agents={agents}
+          />
         )}
       </div>
     </div>
