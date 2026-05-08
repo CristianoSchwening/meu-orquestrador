@@ -1,27 +1,69 @@
 # Meu Orquestrador (Workforce)
 
-A pure-Python multi-agent task orchestration library for planning, routing, and executing subtasks across agents with toolkit support.
+A pure-Python multi-agent task orchestration library with a React + TypeScript frontend dashboard.
 
 ## Run & Operate
 
+- **Run frontend (dev server):** workflow `Start application` → `npm run dev` → port 5000
 - **Run tests:** `python3 -m pytest test_workforce.py -v`
-- **Run demo:** `python3 app.py`
+- **Run Python demo:** `python3 app.py`
 - **No env vars required**
 
 ## Stack
 
+### Backend
 - Python 3.12
 - Standard library only + `concurrent.futures` for parallel execution
 - `pytest` for testing
 
+### Frontend
+- React 18 + TypeScript
+- Vite 6 (dev server on port 5000)
+- Tailwind CSS 4
+- react-router 7 (SPA routing)
+- Recharts (metrics charts)
+- Radix UI + shadcn/ui (component primitives)
+- motion (Framer Motion) for animations
+- react-hook-form for forms
+
 ## Where things live
 
+### Backend
 - `workforce.py` — core library (all public classes/enums)
 - `app.py` — usage demo / entry point
-- `test_workforce.py` — full test suite (23 tests)
+- `test_workforce.py` — full test suite (31 tests)
 - `docs/insights_google_agentic_patterns.md` — improvement roadmap (Google Agentic AI patterns)
 
-## Architecture decisions
+### Frontend
+- `src/main.tsx` — entry point
+- `src/app/App.tsx` — router provider
+- `src/app/routes.tsx` — route definitions
+- `src/app/types/workforce.ts` — TypeScript types (aligned with Python backend)
+- `src/app/data/mockData.ts` — mock executions, agents, tools, playground scenarios
+- `src/app/pages/` — 7 pages (Playground, Dashboard, Executions, ExecutionDetail, WorkforceBuilder, Agents, Toolkit)
+- `src/app/components/` — execution (KanbanBoard, DAGViewer, EventsLog, MetricsPanel, DecisionPanel, SubtaskCard), layout (AppShell), playground (AgentColumn), shared (StatusBadge, QualityScore), ui (shadcn primitives)
+- `vite.config.ts` — Vite config (port 5000, host 0.0.0.0, allowedHosts: true)
+- `index.html` — SPA entry HTML
+- `package.json` — npm dependencies (react + react-dom moved from peerDeps to deps)
+
+### Documentation
+- `Spec Plan.md` — 8-phase development plan for the frontend
+- `Front-Back.md` — gap analysis between Python backend types and frontend types
+- `guidelines/Guidelines.md` — design system guidelines
+
+## Routes
+
+| Route | Page | Description |
+|-------|------|-------------|
+| `/` | PlaygroundPage | Chat interface + animated agent columns simulation |
+| `/dashboard` | DashboardPage | KPI cards, weekly activity chart, recent executions |
+| `/executions` | ExecutionsPage | Table with search + status filter |
+| `/executions/:id` | ExecutionDetailPage | Kanban / DAG / Events / Metrics / Decision tabs |
+| `/workforce` | WorkforceBuilderPage | 5-step wizard to configure and launch a workforce |
+| `/agents` | AgentsPage | Full CRUD with modal form |
+| `/toolkit` | ToolkitPage | Tool catalog by category |
+
+## Architecture decisions (Python backend)
 
 - Thread-safe `TaskBoard` uses `threading.Lock` for claim coordination (single-process only)
 - Two execution modes: `SUBAGENT` (isolated) and `TEAM` (shared `TeamContext`)
@@ -49,6 +91,18 @@ A pure-Python multi-agent task orchestration library for planning, routing, and 
 - `Agent.max_concurrent` + `Workforce.dynamic_router` enable capacity-aware, load-balanced routing
 - `least_loaded_router(subtask, context)` — drop-in router that spreads work across available agents
 
+## Frontend ↔ Backend alignment (see Front-Back.md)
+
+Types are well-aligned. Three backend adjustments needed for real API integration:
+1. Enrich `WorkforceExecution` with `task_name`, `objective`, `pattern`, `agent_ids`, `created_at`, `updated_at` at API layer
+2. Add `timestamp` to all events emitted by the Python engine
+3. Expose `agent.toolkit.tools.keys()` as a list of strings in the agents endpoint
+
+## Pending frontend work (from Spec Plan.md)
+
+- Phase 6: `HumanApprovalModal` + `TeamContextFeed` (not yet implemented)
+- Phase 8: Real API integration (currently all mock data)
+
 ## User preferences
 
 _None recorded yet_
@@ -58,10 +112,6 @@ _None recorded yet_
 - `threading.Lock` only works within a single process — no distributed coordination
 - `on_task_completed_rejection_status` must be `FAILED` or `PENDING` (raises `ValueError` otherwise)
 - Tasks with missing dependency IDs are auto-set to `BLOCKED`
-- `max_iterations` in `ExecutionBudget` counts retries (not total attempts) for `REVIEW_CRITIC`, and refinement cycles for `ITERATIVE_REFINEMENT`
+- `max_iterations` in `ExecutionBudget` counts retries for `REVIEW_CRITIC` and refinement cycles for `ITERATIVE_REFINEMENT`
 - In `PARALLEL` mode, event ordering in `execution.events` is non-deterministic
-
-## Pointers
-
-- See `README.md` for usage examples and execution mode documentation
-- See `docs/insights_google_agentic_patterns.md` for the improvement roadmap
+- `react` and `react-dom` were moved from `peerDependencies` to `dependencies` in `package.json` to allow standalone Vite build

@@ -123,7 +123,7 @@ export default function PlaygroundPage() {
 
     // Phase 2+: Animate each subtask through running → completed
     scenario.subtasks.forEach((stDef, idx) => {
-      const baseDelay = 2000 + scenario.delays[idx + 1] ?? 0
+      const baseDelay = 2000 + (scenario.delays[idx + 1] ?? 0)
 
       // Start running
       const tRun = setTimeout(() => {
