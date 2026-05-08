@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { useParams, useNavigate } from 'react-router'
-import { ArrowLeft, LayoutGrid, GitBranch, Activity, MessageSquare, BarChart3, Info, Users } from 'lucide-react'
+import { ArrowLeft, LayoutGrid, GitBranch, Activity, BarChart3, Info, Users, ShieldAlert } from 'lucide-react'
 import { Button } from '../components/ui/button'
 import { StatusBadge } from '../components/shared/StatusBadge'
 import { KanbanBoard } from '../components/execution/KanbanBoard'
@@ -9,8 +9,9 @@ import { EventsLog } from '../components/execution/EventsLog'
 import { MetricsPanel } from '../components/execution/MetricsPanel'
 import { DecisionPanel } from '../components/execution/DecisionPanel'
 import { TeamContextFeed } from '../components/execution/TeamContextFeed'
+import { HumanApprovalModal } from '../components/execution/HumanApprovalModal'
 import { MOCK_EXECUTIONS, MOCK_AGENTS } from '../data/mockData'
-import type { TaskStatus, WorkforceExecution } from '../types/workforce'
+import type { TaskStatus, WorkforceExecution, HumanApprovalRequest } from '../types/workforce'
 
 type Tab = 'kanban' | 'dag' | 'events' | 'metrics' | 'decision' | 'team_context'
 
@@ -53,8 +54,17 @@ export default function ExecutionDetailPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const [activeTab, setActiveTab] = useState<Tab>('kanban')
+  const [approvalModalOpen, setApprovalModalOpen] = useState(false)
+  const [approvalRequests, setApprovalRequests] = useState<HumanApprovalRequest[]>([])
 
   const exec = MOCK_EXECUTIONS.find((e) => e.task_id === id)
+
+  React.useEffect(() => {
+    if (exec?.approval_requests) {
+      setApprovalRequests(exec.approval_requests)
+    }
+  }, [exec?.task_id])
+
   if (!exec) {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-4">
@@ -73,7 +83,30 @@ export default function ExecutionDetailPage() {
   const progress = Math.round((completedCount / exec.subtasks.length) * 100)
 
   const isTeamMode = exec.mode === 'team'
+  const isHumanInLoop = exec.pattern === 'human_in_the_loop'
   const TABS = isTeamMode ? [...BASE_TABS, TEAM_TAB] : BASE_TABS
+
+  const pendingApprovals = approvalRequests.filter((r) => r.status === 'pending')
+
+  function handleApprove(requestId: string, comment?: string) {
+    setApprovalRequests((prev) =>
+      prev.map((r) =>
+        r.id === requestId
+          ? { ...r, status: 'approved', reviewer_comment: comment, reviewed_at: new Date().toISOString() }
+          : r
+      )
+    )
+  }
+
+  function handleReject(requestId: string, reason: string) {
+    setApprovalRequests((prev) =>
+      prev.map((r) =>
+        r.id === requestId
+          ? { ...r, status: 'rejected', reviewer_comment: reason, reviewed_at: new Date().toISOString() }
+          : r
+      )
+    )
+  }
 
   return (
     <div className="flex flex-col h-full">
@@ -161,6 +194,27 @@ export default function ExecutionDetailPage() {
         </div>
       </div>
 
+      {/* Pending approvals banner */}
+      {isHumanInLoop && pendingApprovals.length > 0 && (
+        <div className="flex items-center justify-between px-6 py-2.5 bg-amber-50 border-b border-amber-200 shrink-0">
+          <div className="flex items-center gap-2">
+            <ShieldAlert className="size-4 text-amber-600 shrink-0" />
+            <p className="text-xs text-amber-800 font-medium">
+              {pendingApprovals.length === 1
+                ? '1 subtarefa aguardando sua aprovação para prosseguir'
+                : `${pendingApprovals.length} subtarefas aguardando sua aprovação para prosseguir`}
+            </p>
+          </div>
+          <Button
+            size="sm"
+            className="bg-amber-600 hover:bg-amber-700 text-white h-7 text-xs px-3 shrink-0"
+            onClick={() => setApprovalModalOpen(true)}
+          >
+            Revisar
+          </Button>
+        </div>
+      )}
+
       {/* Content */}
       <div className="flex-1 overflow-auto p-6">
         {activeTab === 'kanban' && (
@@ -189,6 +243,15 @@ export default function ExecutionDetailPage() {
           />
         )}
       </div>
+
+      <HumanApprovalModal
+        open={approvalModalOpen}
+        requests={approvalRequests}
+        agents={agents}
+        onApprove={handleApprove}
+        onReject={handleReject}
+        onClose={() => setApprovalModalOpen(false)}
+      />
     </div>
   )
 }

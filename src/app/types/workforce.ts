@@ -98,6 +98,7 @@ export interface WorkforceExecution {
   agent_ids: string[]
   events: ExecutionEvent[]
   team_messages?: TeamMessage[]
+  approval_requests?: HumanApprovalRequest[]
   decision_metadata: DecisionMetadata
   metrics: ExecutionMetrics
   created_at: string
@@ -124,6 +125,21 @@ export interface TeamMessage {
   content: string
   subtask_id: string | null
   timestamp: string
+}
+
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected'
+
+export interface HumanApprovalRequest {
+  id: string
+  subtask_id: string
+  subtask_description: string
+  tool_name: string
+  agent_id: string
+  output: string
+  requested_at: string
+  status: ApprovalStatus
+  reviewer_comment?: string
+  reviewed_at?: string
 }
 
 export interface PlaygroundSubtask {
