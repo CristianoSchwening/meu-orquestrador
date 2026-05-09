@@ -16,6 +16,7 @@ import { Button } from '../components/ui/button'
 import { StatusBadge } from '../components/shared/StatusBadge'
 import { MOCK_EXECUTIONS, MOCK_AGENTS } from '../data/mockData'
 import type { WorkforceExecution } from '../types/workforce'
+import { getOverallStatus } from '../utils/execution'
 
 const ACTIVITY_DATA = [
   { day: 'Seg', executions: 3, success: 3 },
@@ -108,9 +109,9 @@ function ActivityChart() {
 export default function DashboardPage() {
   const navigate = useNavigate()
 
-  const completed = MOCK_EXECUTIONS.filter((e) => e.subtasks.every((s) => s.status === 'completed')).length
-  const running = MOCK_EXECUTIONS.filter((e) => e.subtasks.some((s) => s.status === 'running')).length
-  const failed = MOCK_EXECUTIONS.filter((e) => e.subtasks.some((s) => s.status === 'failed')).length
+  const completed = MOCK_EXECUTIONS.filter((e) => getOverallStatus(e) === 'completed').length
+  const running = MOCK_EXECUTIONS.filter((e) => getOverallStatus(e) === 'running').length
+  const failed = MOCK_EXECUTIONS.filter((e) => getOverallStatus(e) === 'failed').length
   const totalSubtasks = MOCK_EXECUTIONS.reduce((a, e) => a + e.subtasks.length, 0)
 
   const stats = [
@@ -251,10 +252,7 @@ export default function DashboardPage() {
 }
 
 function ExecutionRow({ exec, onClick }: { exec: WorkforceExecution; onClick: () => void }) {
-  const allCompleted = exec.subtasks.every((s) => s.status === 'completed')
-  const anyRunning = exec.subtasks.some((s) => s.status === 'running')
-  const anyFailed = exec.subtasks.some((s) => s.status === 'failed')
-  const status = allCompleted ? 'completed' : anyRunning ? 'running' : anyFailed ? 'failed' : 'pending'
+  const status = getOverallStatus(exec)
 
   return (
     <button

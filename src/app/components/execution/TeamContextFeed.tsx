@@ -2,6 +2,7 @@ import React, { useState } from 'react'
 import { MessageSquare, Link2 } from 'lucide-react'
 import { cn } from '../ui/utils'
 import type { TeamMessage, Agent } from '../../types/workforce'
+import { formatTime, formatDate } from '../../utils/execution'
 
 interface TeamContextFeedProps {
   messages: TeamMessage[]
@@ -10,23 +11,6 @@ interface TeamContextFeedProps {
 
 function getAgent(agents: Agent[], senderId: string): Agent | undefined {
   return agents.find((a) => a.id === senderId)
-}
-
-function formatTime(ts: string) {
-  return new Date(ts).toLocaleTimeString('pt-BR', {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  })
-}
-
-function formatDate(ts: string) {
-  return new Date(ts).toLocaleDateString('pt-BR', {
-    day: '2-digit',
-    month: 'short',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
 }
 
 export function TeamContextFeed({ messages, agents }: TeamContextFeedProps) {

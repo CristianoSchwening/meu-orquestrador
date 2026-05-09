@@ -13,6 +13,7 @@ import {
 } from 'recharts'
 import { Clock, Cpu, RefreshCw, ThumbsDown } from 'lucide-react'
 import type { ExecutionMetrics, Subtask } from '../../types/workforce'
+import { formatDuration } from '../../utils/execution'
 
 const PIE_COLORS: Record<string, string> = {
   completed: '#10b981',
@@ -42,9 +43,7 @@ export function MetricsPanel({ metrics, subtasks }: MetricsPanelProps) {
   const stats = [
     {
       label: 'Tempo Total',
-      value: metrics.total_elapsed_ms >= 1000
-        ? `${(metrics.total_elapsed_ms / 1000).toFixed(1)}s`
-        : `${Math.round(metrics.total_elapsed_ms)}ms`,
+      value: formatDuration(metrics.total_elapsed_ms),
       icon: Clock,
       color: 'text-blue-600',
       bg: 'bg-blue-50',

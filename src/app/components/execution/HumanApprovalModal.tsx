@@ -7,7 +7,6 @@ import {
   ChevronRight,
   Clock,
   Wrench,
-  Bot,
   FileText,
   MessageSquare,
 } from 'lucide-react'
@@ -20,6 +19,7 @@ import {
 import { Button } from '../ui/button'
 import { cn } from '../ui/utils'
 import type { HumanApprovalRequest, Agent } from '../../types/workforce'
+import { formatDate } from '../../utils/execution'
 
 interface HumanApprovalModalProps {
   open: boolean
@@ -28,15 +28,6 @@ interface HumanApprovalModalProps {
   onApprove: (requestId: string, comment?: string) => void
   onReject: (requestId: string, reason: string) => void
   onClose: () => void
-}
-
-function formatTime(ts: string) {
-  return new Date(ts).toLocaleString('pt-BR', {
-    day: '2-digit',
-    month: 'short',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
 }
 
 export function HumanApprovalModal({
@@ -146,7 +137,7 @@ export function HumanApprovalModal({
             )}
             <MetaPill
               icon={<Clock className="size-3" />}
-              label={formatTime(current.requested_at)}
+              label={formatDate(current.requested_at)}
             />
           </div>
 

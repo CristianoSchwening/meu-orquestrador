@@ -11,7 +11,8 @@ import { DecisionPanel } from '../components/execution/DecisionPanel'
 import { TeamContextFeed } from '../components/execution/TeamContextFeed'
 import { HumanApprovalModal } from '../components/execution/HumanApprovalModal'
 import { MOCK_EXECUTIONS, MOCK_AGENTS } from '../data/mockData'
-import type { TaskStatus, WorkforceExecution, HumanApprovalRequest } from '../types/workforce'
+import type { HumanApprovalRequest } from '../types/workforce'
+import { getOverallStatus, PATTERN_LABEL, MODE_LABEL, formatDuration } from '../utils/execution'
 
 type Tab = 'kanban' | 'dag' | 'events' | 'metrics' | 'decision' | 'team_context'
 
@@ -27,27 +28,6 @@ const TEAM_TAB: { id: Tab; label: string; icon: React.ElementType } = {
   id: 'team_context',
   label: 'Team Context',
   icon: Users,
-}
-
-function getOverallStatus(exec: WorkforceExecution): TaskStatus {
-  if (exec.subtasks.every((s) => s.status === 'completed')) return 'completed'
-  if (exec.subtasks.some((s) => s.status === 'running')) return 'running'
-  if (exec.subtasks.some((s) => s.status === 'failed')) return 'failed'
-  if (exec.subtasks.some((s) => s.status === 'pending')) return 'pending'
-  return 'blocked'
-}
-
-const PATTERN_LABEL: Record<string, string> = {
-  sequential: 'Sequencial',
-  parallel: 'Paralelo',
-  review_critic: 'Review-Critic',
-  iterative_refinement: 'Iterativo',
-  human_in_the_loop: 'Human-in-Loop',
-}
-
-const MODE_LABEL: Record<string, string> = {
-  subagent: 'SubAgent',
-  team: 'Team',
 }
 
 export default function ExecutionDetailPage() {
@@ -168,9 +148,7 @@ export default function ExecutionDetailPage() {
           {exec.metrics.total_elapsed_ms > 0 && (
             <MetaItem
               label="Duração"
-              value={exec.metrics.total_elapsed_ms >= 1000
-                ? `${(exec.metrics.total_elapsed_ms / 1000).toFixed(1)}s`
-                : `${Math.round(exec.metrics.total_elapsed_ms)}ms`}
+              value={formatDuration(exec.metrics.total_elapsed_ms)}
             />
           )}
         </div>

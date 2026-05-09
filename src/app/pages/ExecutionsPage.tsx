@@ -14,28 +14,7 @@ import {
 import { StatusBadge } from '../components/shared/StatusBadge'
 import { Button } from '../components/ui/button'
 import { MOCK_EXECUTIONS, MOCK_AGENTS } from '../data/mockData'
-import type { TaskStatus, WorkforceExecution } from '../types/workforce'
-
-const PATTERN_LABEL: Record<string, string> = {
-  sequential: 'Sequencial',
-  parallel: 'Paralelo',
-  review_critic: 'Review-Critic',
-  iterative_refinement: 'Iterativo',
-  human_in_the_loop: 'Human-in-Loop',
-}
-
-const MODE_LABEL: Record<string, string> = {
-  subagent: 'SubAgent',
-  team: 'Team',
-}
-
-function getStatus(exec: WorkforceExecution): TaskStatus {
-  if (exec.subtasks.every((s) => s.status === 'completed')) return 'completed'
-  if (exec.subtasks.some((s) => s.status === 'running')) return 'running'
-  if (exec.subtasks.some((s) => s.status === 'failed')) return 'failed'
-  if (exec.subtasks.some((s) => s.status === 'pending')) return 'pending'
-  return 'blocked'
-}
+import { getOverallStatus, PATTERN_LABEL } from '../utils/execution'
 
 export default function ExecutionsPage() {
   const navigate = useNavigate()
@@ -49,7 +28,7 @@ export default function ExecutionsPage() {
       !search ||
       exec.task_name.toLowerCase().includes(search.toLowerCase()) ||
       exec.objective.toLowerCase().includes(search.toLowerCase())
-    const status = getStatus(exec)
+    const status = getOverallStatus(exec)
     const matchStatus = filterStatus === 'all' || status === filterStatus
     return matchSearch && matchStatus
   })
@@ -107,7 +86,7 @@ export default function ExecutionsPage() {
             { status: 'pending', label: 'Pendentes', icon: Clock, color: 'text-slate-500' },
           ] as const
         ).map(({ status, label, icon: Icon, color }) => {
-          const count = MOCK_EXECUTIONS.filter((e) => getStatus(e) === status).length
+          const count = MOCK_EXECUTIONS.filter((e) => getOverallStatus(e) === status).length
           return (
             <button
               key={status}
@@ -150,7 +129,7 @@ export default function ExecutionsPage() {
                 </tr>
               ) : (
                 filtered.map((exec) => {
-                  const status = getStatus(exec)
+                  const status = getOverallStatus(exec)
                   const completedCount = exec.subtasks.filter((s) => s.status === 'completed').length
                   return (
                     <tr
