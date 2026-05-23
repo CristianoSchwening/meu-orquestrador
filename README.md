@@ -225,3 +225,40 @@ O orquestrador usa um `TaskBoard` com `claim_next(agent_name)` protegido por loc
 - Thread-safe apenas em processo local (uso de `threading.Lock`).
 - Não há coordenação distribuída entre múltiplos processos/máquinas.
 - Para distribuição real, seria necessário backend externo (ex.: fila, banco com lock/lease).
+
+## Integração com LLM local gratuito (Ollama)
+
+Para testar a lógica do backend com um modelo gratuito/local, você pode usar o `OllamaTool`.
+
+### 1) Instalar e subir o Ollama
+
+```bash
+# macOS/Linux (via instalador oficial)
+ollama serve
+ollama pull llama3.2:3b
+```
+
+### 2) Registrar a tool no orquestrador
+
+```python
+from ollama_tool import OllamaTool
+
+toolkit = Toolkit()
+toolkit.register(OllamaTool(model="llama3.2:3b"))
+```
+
+### 3) Criar subtask que chama o modelo
+
+```python
+Subtask(
+    description="Gerar rascunho",
+    tool_name="ollama_generate",
+    params={"prompt": "Resuma os próximos passos do objetivo em 3 bullets."},
+)
+```
+
+### Observações
+
+- A tool usa a API local em `http://localhost:11434/api/generate`.
+- É possível sobrescrever o modelo por subtask com `params={"model": "..."}`.
+- Em ambiente sem Ollama rodando, a subtask falhará e o erro ficará em `subtask.error`.

@@ -904,3 +904,32 @@ def test_reroute_event_emitted_on_route_change():
     assert reroute_events[0]["subtask_id"] == "T"
     assert reroute_events[0]["from_agent"] == "a"
     assert reroute_events[0]["to_agent"] == "b"
+
+from ollama_tool import OllamaTool
+
+
+def test_ollama_tool_uses_requester_and_returns_response():
+    captured = {}
+
+    def fake_requester(url: str, body: bytes, timeout_seconds: float):
+        captured["url"] = url
+        captured["body"] = body.decode("utf-8")
+        captured["timeout"] = timeout_seconds
+        return {"response": "ok-local-llm"}
+
+    tool = OllamaTool(model="llama3.2:3b", requester=fake_requester)
+    output = tool.run(prompt="Teste rápido")
+
+    assert output == "ok-local-llm"
+    assert captured["url"].endswith("/api/generate")
+    assert '"model": "llama3.2:3b"' in captured["body"]
+
+
+def test_ollama_tool_requires_non_empty_prompt():
+    tool = OllamaTool(requester=lambda *_args, **_kwargs: {"response": "unused"})
+
+    try:
+        tool.run(prompt="")
+        assert False, "esperava ValueError"
+    except ValueError as exc:
+        assert "prompt" in str(exc)
