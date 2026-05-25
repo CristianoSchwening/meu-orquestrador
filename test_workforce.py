@@ -15,6 +15,7 @@ from workforce import (
 )
 from threading import Thread, Lock
 import time
+import pytest
 
 
 class SumTool:
@@ -1002,3 +1003,71 @@ def test_consecutive_execute_calls_do_not_share_mutations_from_planner_subtasks(
     assert second.subtasks[0].metadata["routed_agent"] == "main"
     assert "routed_agent" not in planner_calls[0].metadata
     assert "routed_agent" not in planner_calls[1].metadata
+
+
+def test_validate_plan_detects_simple_cycle():
+    toolkit = Toolkit()
+    toolkit.register(SumTool())
+
+    workforce = Workforce(
+        planner=lambda _: [
+            Subtask(id="A", description="a", tool_name="sum", params={"a": 1, "b": 1}, depends_on=["B"]),
+            Subtask(id="B", description="b", tool_name="sum", params={"a": 2, "b": 2}, depends_on=["A"]),
+        ],
+        agents={"main": Agent(name="main", toolkit=toolkit)},
+        task_router=router,
+    )
+
+    with pytest.raises(ValueError, match=r"Cycle detected: A -> B -> A"):
+        workforce.execute(task_id="t-cycle-simple", objective="run")
+
+
+def test_validate_plan_detects_larger_cycle():
+    toolkit = Toolkit()
+    toolkit.register(SumTool())
+
+    workforce = Workforce(
+        planner=lambda _: [
+            Subtask(id="A", description="a", tool_name="sum", params={"a": 1, "b": 1}, depends_on=["B"]),
+            Subtask(id="B", description="b", tool_name="sum", params={"a": 2, "b": 2}, depends_on=["C"]),
+            Subtask(id="C", description="c", tool_name="sum", params={"a": 3, "b": 3}, depends_on=["A"]),
+        ],
+        agents={"main": Agent(name="main", toolkit=toolkit)},
+        task_router=router,
+    )
+
+    with pytest.raises(ValueError, match=r"Cycle detected: A -> B -> C -> A"):
+        workforce.execute(task_id="t-cycle-large", objective="run")
+
+
+def test_validate_plan_detects_missing_dependency():
+    toolkit = Toolkit()
+    toolkit.register(SumTool())
+
+    workforce = Workforce(
+        planner=lambda _: [
+            Subtask(id="A", description="a", tool_name="sum", params={"a": 1, "b": 1}, depends_on=["Z"]),
+        ],
+        agents={"main": Agent(name="main", toolkit=toolkit)},
+        task_router=router,
+    )
+
+    with pytest.raises(ValueError, match=r"Dependencies refer to unknown IDs: Z"):
+        workforce.execute(task_id="t-missing-dep", objective="run")
+
+
+def test_validate_plan_detects_duplicate_ids():
+    toolkit = Toolkit()
+    toolkit.register(SumTool())
+
+    workforce = Workforce(
+        planner=lambda _: [
+            Subtask(id="A", description="a1", tool_name="sum", params={"a": 1, "b": 1}),
+            Subtask(id="A", description="a2", tool_name="sum", params={"a": 2, "b": 2}),
+        ],
+        agents={"main": Agent(name="main", toolkit=toolkit)},
+        task_router=router,
+    )
+
+    with pytest.raises(ValueError, match=r"Duplicate subtask IDs: A"):
+        workforce.execute(task_id="t-duplicate-ids", objective="run")

@@ -379,6 +379,60 @@ class Workforce:
             completed_at=subtask.completed_at,
         )
 
+
+    def _validate_plan(self, subtasks: List[Subtask]) -> None:
+        ids = [subtask.id for subtask in subtasks]
+        seen: set[str] = set()
+        duplicated: set[str] = set()
+        for subtask_id in ids:
+            if subtask_id in seen:
+                duplicated.add(subtask_id)
+            seen.add(subtask_id)
+        if duplicated:
+            dup_list = ", ".join(sorted(duplicated))
+            raise ValueError(f"Duplicate subtask IDs: {dup_list}")
+
+        id_set = set(ids)
+        missing_dependencies: set[str] = set()
+        missing_pairs: List[str] = []
+        for subtask in subtasks:
+            for dep_id in subtask.depends_on:
+                if dep_id not in id_set:
+                    missing_dependencies.add(dep_id)
+                    missing_pairs.append(f"{subtask.id}->{dep_id}")
+        if missing_dependencies:
+            pairs = ", ".join(missing_pairs)
+            missing_list = ", ".join(sorted(missing_dependencies))
+            raise ValueError(
+                f"Dependencies refer to unknown IDs: {missing_list} (references: {pairs})"
+            )
+
+        adjacency: Dict[str, List[str]] = {subtask.id: list(subtask.depends_on) for subtask in subtasks}
+        colors: Dict[str, int] = {subtask_id: 0 for subtask_id in ids}
+        stack: List[str] = []
+
+        def dfs(node: str) -> List[str] | None:
+            colors[node] = 1
+            stack.append(node)
+            for dep in adjacency[node]:
+                if colors[dep] == 0:
+                    cycle = dfs(dep)
+                    if cycle is not None:
+                        return cycle
+                elif colors[dep] == 1:
+                    start = stack.index(dep)
+                    return stack[start:] + [dep]
+            stack.pop()
+            colors[node] = 2
+            return None
+
+        for subtask_id in ids:
+            if colors[subtask_id] != 0:
+                continue
+            cycle = dfs(subtask_id)
+            if cycle is not None:
+                raise ValueError(f"Cycle detected: {' -> '.join(cycle)}")
+
     def _dependency_depth(self, subtasks: List[Subtask]) -> int:
         subtask_map = {subtask.id: subtask for subtask in subtasks}
         memo: Dict[str, int] = {}
@@ -717,6 +771,7 @@ class Workforce:
 
         planned_subtasks = self.planner(objective)
         isolated_planned_subtasks = [self._clone_subtask(subtask) for subtask in planned_subtasks]
+        self._validate_plan(isolated_planned_subtasks)
         decision_metadata = self._plan_decision_metadata(isolated_planned_subtasks)
         subtasks: List[Subtask] = []
 
