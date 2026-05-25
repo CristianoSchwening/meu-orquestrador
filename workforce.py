@@ -304,6 +304,8 @@ class WorkforceExecution:
     events: List[Dict[str, Any]] = field(default_factory=list)
     decision_metadata: Dict[str, Any] = field(default_factory=dict)
     metrics: Dict[str, Any] = field(default_factory=dict)
+    _event_seq: int = field(default=0, init=False, repr=False)
+    _event_lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
     @property
     def status(self) -> TaskStatus:
@@ -356,6 +358,14 @@ class Workforce:
     human_approval_gate: HumanApprovalGate | None = None
     dynamic_router: DynamicRouterFn | None = None
 
+    def _append_event(self, execution: WorkforceExecution, event: Dict[str, Any]) -> None:
+        with execution._event_lock:
+            execution._event_seq += 1
+            payload = dict(event)
+            payload["ts"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            payload["seq"] = execution._event_seq
+            payload["task_id"] = execution.task_id
+            execution.events.append(payload)
 
     def _clone_subtask(self, subtask: Subtask) -> Subtask:
         return Subtask(
@@ -533,7 +543,8 @@ class Workforce:
             if fallback_route is None:
                 fallback_route = next(iter(self.agents))
 
-            execution.events.append(
+            self._append_event(
+                execution,
                 {
                     "type": "subtask_reroute_invalid",
                     "subtask_id": subtask.id,
@@ -543,19 +554,20 @@ class Workforce:
                         f"dynamic_router returned invalid agent {candidate_route!r}; "
                         f"expected one of {sorted(self.agents.keys())}"
                     ),
-                }
+                },
             )
             return fallback_route
 
         changes = task_board.reroute_pending(safe_router)
         for subtask_id, old_route, new_route in changes:
-            execution.events.append(
+            self._append_event(
+                execution,
                 {
                     "type": "subtask_rerouted",
                     "subtask_id": subtask_id,
                     "from_agent": old_route,
                     "to_agent": new_route,
-                }
+                },
             )
 
     def _apply_team_context(
@@ -567,13 +579,14 @@ class Workforce:
     ) -> None:
         if team_context is not None:
             subtask.params.setdefault("team_context", team_context)
-            execution.events.append(
+            self._append_event(
+                execution,
                 {
                     "type": "team_context_shared",
                     "subtask_id": subtask.id,
                     "agent": agent_name,
                     "messages_so_far": len(team_context.messages),
-                }
+                },
             )
 
     def _apply_on_task_completed_hook(
@@ -627,24 +640,26 @@ class Workforce:
                 subtask.output = None
                 subtask.error = None
                 task_board.reset_for_retry(subtask)
-                execution.events.append(
+                self._append_event(
+                    execution,
                     {
                         "type": "subtask_retry",
                         "subtask_id": subtask.id,
                         "attempt": subtask.attempt,
                         "critic_feedback": critic_result.feedback,
-                    }
+                    },
                 )
                 return False
             else:
                 subtask.status = TaskStatus.FAILED
                 subtask.error = f"Critic rejected after {subtask.attempt} attempts: {critic_result.feedback}"
-                execution.events.append(
+                self._append_event(
+                    execution,
                     {
                         "type": "subtask_critic_exhausted",
                         "subtask_id": subtask.id,
                         "attempts": subtask.attempt,
-                    }
+                    },
                 )
         return True
 
@@ -663,10 +678,10 @@ class Workforce:
         if not approved:
             subtask.status = TaskStatus.FAILED
             subtask.error = "Rejected by human approval gate"
-            execution.events.append({"type": "subtask_human_rejected", "subtask_id": subtask.id})
+            self._append_event(execution, {"type": "subtask_human_rejected", "subtask_id": subtask.id})
             return False
 
-        execution.events.append({"type": "subtask_human_approved", "subtask_id": subtask.id})
+        self._append_event(execution, {"type": "subtask_human_approved", "subtask_id": subtask.id})
         return True
 
     def _run_one_subtask(
@@ -683,17 +698,19 @@ class Workforce:
         metrics.record_subtask(subtask)
 
         if subtask.status == TaskStatus.COMPLETED:
-            execution.events.append(
+            self._append_event(
+                execution,
                 {"type": "subtask_completed", "subtask_id": subtask.id, "agent": agent_name}
             )
         elif subtask.status == TaskStatus.FAILED:
-            execution.events.append(
+            self._append_event(
+                execution,
                 {
                     "type": "subtask_failed",
                     "subtask_id": subtask.id,
                     "agent": agent_name,
                     "reason": subtask.error,
-                }
+                },
             )
 
         self._apply_on_task_completed_hook(subtask, execution, task_board)
@@ -715,7 +732,7 @@ class Workforce:
         while True:
             exceeded, reason = self._is_budget_exceeded(metrics, start)
             if exceeded:
-                execution.events.append({"type": "budget_exceeded", "reason": reason})
+                self._append_event(execution, {"type": "budget_exceeded", "reason": reason})
                 break
 
             self._apply_dynamic_routing(execution, task_board)
@@ -743,7 +760,7 @@ class Workforce:
             while True:
                 exceeded, reason = self._is_budget_exceeded(metrics, start)
                 if exceeded:
-                    execution.events.append({"type": "budget_exceeded", "reason": reason})
+                    self._append_event(execution, {"type": "budget_exceeded", "reason": reason})
                     break
                 self._apply_dynamic_routing(execution, task_board)
                 subtask = task_board.claim_next(agent_name)
@@ -769,7 +786,7 @@ class Workforce:
         while True:
             exceeded, reason = self._is_budget_exceeded(metrics, start)
             if exceeded:
-                execution.events.append({"type": "budget_exceeded", "reason": reason})
+                self._append_event(execution, {"type": "budget_exceeded", "reason": reason})
                 break
 
             self._apply_dynamic_routing(execution, task_board)
@@ -794,10 +811,11 @@ class Workforce:
                     break
 
                 metrics.iterations += 1
-                execution.events.append({"type": "refinement_cycle", "iteration": metrics.iterations})
+                self._append_event(execution, {"type": "refinement_cycle", "iteration": metrics.iterations})
 
                 if max_iter is not None and metrics.iterations >= max_iter:
-                    execution.events.append(
+                    self._append_event(
+                        execution,
                         {"type": "max_iterations_reached", "iterations": metrics.iterations}
                     )
                     break
@@ -834,12 +852,13 @@ class Workforce:
             mode=self.execution_mode,
             decision_metadata=decision_metadata.as_dict(),
         )
-        execution.events.append(
+        self._append_event(
+            execution,
             {
                 "type": "execution_started",
                 "mode": self.execution_mode.value,
                 "pattern": self.execution_pattern.value,
-            }
+            },
         )
 
         agent_capacities = {
@@ -865,6 +884,6 @@ class Workforce:
 
         metrics.total_elapsed_ms = (datetime.now(timezone.utc) - start).total_seconds() * 1000
         execution.metrics = metrics.as_dict()
-        execution.events.append({"type": "execution_finished", "status": execution.status.value})
+        self._append_event(execution, {"type": "execution_finished", "status": execution.status.value})
 
         return execution

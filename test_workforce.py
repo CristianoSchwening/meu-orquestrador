@@ -16,6 +16,7 @@ from workforce import (
 from threading import Thread, Lock
 import time
 import pytest
+from datetime import datetime
 
 
 class SumTool:
@@ -260,6 +261,14 @@ def test_execution_mode_team_shares_context_and_records_events():
     assert result.events[0]["mode"] == "team"
     assert result.events[0]["pattern"] == "sequential"
     assert result.events[-1]["type"] == "execution_finished"
+    assert result.events[0]["seq"] == 1
+    assert result.events[-1]["seq"] == len(result.events)
+    assert [event["seq"] for event in result.events] == list(range(1, len(result.events) + 1))
+    assert all(event["task_id"] == "t-team" for event in result.events)
+    assert all("ts" in event for event in result.events)
+    for event in result.events:
+        parsed = datetime.fromisoformat(event["ts"].replace("Z", "+00:00"))
+        assert parsed.tzinfo is not None
 
 
 def test_taskboard_claim_next_thread_safe_prevents_double_claim():
@@ -1121,4 +1130,3 @@ def test_dynamic_router_invalid_route_falls_back_and_emits_event():
     assert event["subtask_id"] == "B"
     assert event["attempted_agent"] == "invalid-agent"
     assert event["fallback_agent"] == "a"
-
