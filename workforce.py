@@ -504,13 +504,50 @@ class Workforce:
             available_agents=available,
         )
 
+
+    def _is_valid_agent_route(self, route: Any) -> bool:
+        return isinstance(route, str) and route in self.agents
+
+    def _validate_initial_route(self, subtask: Subtask, route: Any) -> str:
+        if not self._is_valid_agent_route(route):
+            raise ValueError(
+                f"Invalid initial route for subtask '{subtask.id}': {route!r}. "
+                f"Expected one of: {sorted(self.agents.keys())}"
+            )
+        return route
+
     def _apply_dynamic_routing(
         self, execution: WorkforceExecution, task_board: TaskBoard
     ) -> None:
         if self.dynamic_router is None:
             return
         context = self._build_router_context(task_board)
-        changes = task_board.reroute_pending(lambda subtask: self.dynamic_router(subtask, context))  # type: ignore[arg-type]
+
+        def safe_router(subtask: Subtask) -> str:
+            previous_route = subtask.metadata.get("routed_agent")
+            candidate_route = self.dynamic_router(subtask, context)
+            if self._is_valid_agent_route(candidate_route):
+                return candidate_route
+
+            fallback_route = previous_route if self._is_valid_agent_route(previous_route) else None
+            if fallback_route is None:
+                fallback_route = next(iter(self.agents))
+
+            execution.events.append(
+                {
+                    "type": "subtask_reroute_invalid",
+                    "subtask_id": subtask.id,
+                    "attempted_agent": candidate_route,
+                    "fallback_agent": fallback_route,
+                    "reason": (
+                        f"dynamic_router returned invalid agent {candidate_route!r}; "
+                        f"expected one of {sorted(self.agents.keys())}"
+                    ),
+                }
+            )
+            return fallback_route
+
+        changes = task_board.reroute_pending(safe_router)
         for subtask_id, old_route, new_route in changes:
             execution.events.append(
                 {
@@ -816,7 +853,8 @@ class Workforce:
         start = datetime.now(timezone.utc)
 
         for subtask in execution.subtasks:
-            subtask.metadata["routed_agent"] = self.task_router(subtask)
+            routed_agent = self._validate_initial_route(subtask, self.task_router(subtask))
+            subtask.metadata["routed_agent"] = routed_agent
 
         if self.execution_pattern == ExecutionPattern.PARALLEL:
             self._execute_parallel(execution, task_board, team_context, metrics, start)
