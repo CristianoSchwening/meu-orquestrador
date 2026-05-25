@@ -1071,3 +1071,54 @@ def test_validate_plan_detects_duplicate_ids():
 
     with pytest.raises(ValueError, match=r"Duplicate subtask IDs: A"):
         workforce.execute(task_id="t-duplicate-ids", objective="run")
+
+def test_execute_raises_value_error_when_static_router_returns_unknown_agent():
+    toolkit = Toolkit()
+    toolkit.register(SumTool())
+
+    workforce = Workforce(
+        planner=lambda _: [Subtask(id="A", description="a", tool_name="sum", params={"a": 1, "b": 2})],
+        agents={"main": Agent(name="main", toolkit=toolkit)},
+        task_router=lambda _: "ghost",
+    )
+
+    with pytest.raises(ValueError, match=r"Invalid initial route for subtask 'A': 'ghost'"):
+        workforce.execute(task_id="t-invalid-static-route", objective="run")
+
+
+def test_dynamic_router_invalid_route_falls_back_and_emits_event():
+    toolkit = Toolkit()
+    toolkit.register(MarkerTool())
+    routed_to = {}
+
+    class RecordingAgent(Agent):
+        def execute_subtask(self, task):
+            routed_to[task.id] = self.name
+            return super().execute_subtask(task)
+
+    workforce = Workforce(
+        planner=lambda _: [
+            Subtask(id="A", description="a", tool_name="mark", params={"calls": [], "name": "A"}),
+            Subtask(id="B", description="b", tool_name="mark", params={"calls": [], "name": "B"}),
+        ],
+        agents={
+            "a": RecordingAgent(name="a", toolkit=toolkit),
+            "b": RecordingAgent(name="b", toolkit=toolkit),
+        },
+        task_router=lambda _: "a",
+        dynamic_router=lambda subtask, _context: "invalid-agent" if subtask.id == "B" else "b",
+    )
+
+    result = workforce.execute(task_id="t-invalid-dynamic-route", objective="run")
+
+    assert result.status == TaskStatus.COMPLETED
+    assert routed_to["A"] == "b"
+    assert routed_to["B"] == "a"
+
+    invalid_events = [e for e in result.events if e["type"] == "subtask_reroute_invalid"]
+    assert len(invalid_events) == 1
+    event = invalid_events[0]
+    assert event["subtask_id"] == "B"
+    assert event["attempted_agent"] == "invalid-agent"
+    assert event["fallback_agent"] == "a"
+
