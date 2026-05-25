@@ -262,3 +262,23 @@ Subtask(
 - A tool usa a API local em `http://localhost:11434/api/generate`.
 - É possível sobrescrever o modelo por subtask com `params={"model": "..."}`.
 - Em ambiente sem Ollama rodando, a subtask falhará e o erro ficará em `subtask.error`.
+
+## Arquitetura
+
+A arquitetura do projeto está organizada em duas fronteiras principais:
+
+- `engine/` (**Python**): responsável por planejamento, roteamento, execução de subtarefas, gestão de estados, eventos e consolidação de métricas.
+- `ui/` (**React**): responsável por visualização do estado de execução, timeline de eventos, métricas, decisões e interação humana (aprovações, inspeção de resultados).
+
+### Fluxo de integração esperado (engine -> ui)
+
+1. O `engine/` recebe um objetivo e cria a `task` com status inicial `pending`.
+2. Ao iniciar, transiciona para `running`, gera `events` e executa `subtasks` conforme dependências.
+3. Durante a execução, atualiza estados, publica `events`, agrega `metrics` e preenche `decision_metadata`.
+4. Ao final, retorna payload versionado com `contract_version` e resultado consolidado.
+5. A `ui/` consome o payload canônico e renderiza board/timeline/métricas, tratando campos opcionais de forma resiliente.
+
+Para detalhes do contrato e exemplo canônico de payload, consultar:
+
+- `docs/architecture/orchestrator_contract.md`
+- `docs/architecture/samples/execution_result.json`

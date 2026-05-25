@@ -1,0 +1,120 @@
+{
+  "contract_version": "1.0.0",
+  "task": {
+    "id": "task-123",
+    "objective": "Gerar resumo executivo com fontes",
+    "status": "completed",
+    "created_at": "2026-05-25T10:00:00Z",
+    "updated_at": "2026-05-25T10:00:08Z",
+    "started_at": "2026-05-25T10:00:01Z",
+    "completed_at": "2026-05-25T10:00:08Z",
+    "owner": "orchestrator",
+    "priority": "high"
+  },
+  "subtasks": [
+    {
+      "id": "st-1",
+      "task_id": "task-123",
+      "description": "Pesquisar fontes confiáveis",
+      "agent": "researcher",
+      "tool_name": "web_search",
+      "params": {
+        "query": "mercado IA 2026"
+      },
+      "depends_on": [],
+      "status": "completed",
+      "attempt": 1,
+      "started_at": "2026-05-25T10:00:01Z",
+      "finished_at": "2026-05-25T10:00:04Z",
+      "output": {
+        "sources_found": 6
+      },
+      "error": null
+    },
+    {
+      "id": "st-2",
+      "task_id": "task-123",
+      "description": "Consolidar resumo",
+      "agent": "writer",
+      "tool_name": "summarizer",
+      "params": {
+        "max_tokens": 450
+      },
+      "depends_on": [
+        "st-1"
+      ],
+      "status": "completed",
+      "attempt": 1,
+      "started_at": "2026-05-25T10:00:04Z",
+      "finished_at": "2026-05-25T10:00:07Z",
+      "output": {
+        "summary": "Resumo executivo gerado com 6 fontes."
+      },
+      "error": null
+    }
+  ],
+  "events": [
+    {
+      "id": "evt-1",
+      "type": "task_started",
+      "task_id": "task-123",
+      "subtask_id": null,
+      "timestamp": "2026-05-25T10:00:01Z",
+      "payload": {
+        "execution_mode": "TEAM"
+      }
+    },
+    {
+      "id": "evt-2",
+      "type": "subtask_completed",
+      "task_id": "task-123",
+      "subtask_id": "st-1",
+      "timestamp": "2026-05-25T10:00:04Z",
+      "payload": {
+        "agent": "researcher"
+      }
+    },
+    {
+      "id": "evt-3",
+      "type": "task_completed",
+      "task_id": "task-123",
+      "subtask_id": null,
+      "timestamp": "2026-05-25T10:00:08Z",
+      "payload": {
+        "result": "success"
+      }
+    }
+  ],
+  "metrics": {
+    "total_subtasks": 2,
+    "completed_subtasks": 2,
+    "failed_subtasks": 0,
+    "blocked_subtasks": 0,
+    "running_subtasks": 0,
+    "pending_subtasks": 0,
+    "execution_time_ms": 7000,
+    "success_rate": 1
+  },
+  "decision_metadata": {
+    "planner_version": "planner-v2",
+    "router_version": "router-v1",
+    "execution_mode": "TEAM",
+    "fallback_used": false,
+    "human_approval_required": false,
+    "human_approval_received": false,
+    "decision_trace": [
+      {
+        "step": "planning",
+        "reason": "Objetivo exige pesquisa antes da síntese",
+        "confidence": 0.92,
+        "timestamp": "2026-05-25T10:00:01Z"
+      },
+      {
+        "step": "routing",
+        "reason": "Ferramenta web_search associada ao agente researcher",
+        "confidence": 0.95,
+        "timestamp": "2026-05-25T10:00:01Z"
+      }
+    ]
+  }
+}
