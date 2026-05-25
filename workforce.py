@@ -7,6 +7,7 @@ from threading import Lock
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 import uuid
+import copy
 
 
 class TaskStatus(str, Enum):
@@ -355,6 +356,29 @@ class Workforce:
     human_approval_gate: HumanApprovalGate | None = None
     dynamic_router: DynamicRouterFn | None = None
 
+
+    def _clone_subtask(self, subtask: Subtask) -> Subtask:
+        return Subtask(
+            description=subtask.description,
+            tool_name=subtask.tool_name,
+            params=copy.deepcopy(subtask.params),
+            id=subtask.id,
+            depends_on=list(subtask.depends_on),
+            blocked_reason=subtask.blocked_reason,
+            status=subtask.status,
+            output=subtask.output,
+            error=subtask.error,
+            claimed_by=subtask.claimed_by,
+            claimed_at=subtask.claimed_at,
+            metadata=copy.deepcopy(subtask.metadata),
+            attempt=subtask.attempt,
+            parent_subtask_id=subtask.parent_subtask_id,
+            quality_score=subtask.quality_score,
+            critic_feedback=subtask.critic_feedback,
+            started_at=subtask.started_at,
+            completed_at=subtask.completed_at,
+        )
+
     def _dependency_depth(self, subtasks: List[Subtask]) -> int:
         subtask_map = {subtask.id: subtask for subtask in subtasks}
         memo: Dict[str, int] = {}
@@ -692,10 +716,11 @@ class Workforce:
             raise ValueError("on_task_completed_rejection_status must be FAILED or PENDING")
 
         planned_subtasks = self.planner(objective)
-        decision_metadata = self._plan_decision_metadata(planned_subtasks)
+        isolated_planned_subtasks = [self._clone_subtask(subtask) for subtask in planned_subtasks]
+        decision_metadata = self._plan_decision_metadata(isolated_planned_subtasks)
         subtasks: List[Subtask] = []
 
-        for subtask in planned_subtasks:
+        for subtask in isolated_planned_subtasks:
             if self.on_task_created is None:
                 subtasks.append(subtask)
                 continue

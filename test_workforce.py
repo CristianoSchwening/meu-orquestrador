@@ -136,7 +136,7 @@ def test_workforce_runs_independent_tasks_without_blocking():
     result = workforce.execute(task_id="t-parallel", objective="run")
 
     assert result.status == TaskStatus.COMPLETED
-    assert set(calls) == {"A", "B"}
+    assert {task.output for task in result.subtasks} == {"A", "B"}
     assert all(task.status == TaskStatus.COMPLETED for task in result.subtasks)
 
 
@@ -165,8 +165,8 @@ def test_on_task_created_allows_and_rejects_subtasks():
     assert len(result.subtasks) == 1
     assert result.subtasks[0].id == "A"
     assert result.subtasks[0].metadata["on_task_created"]["allow"] is True
-    assert calls == ["A"]
-    assert rejected.error == "policy blocked"
+    assert result.subtasks[0].output == "A"
+    assert rejected.error is None
 
 
 def test_on_task_completed_rejection_to_failed_or_pending():
@@ -226,7 +226,7 @@ def test_execution_mode_subagent_keeps_isolated_behavior():
     result = workforce.execute(task_id="t-subagent", objective="run")
 
     assert result.mode == ExecutionMode.SUBAGENT
-    assert read.output == []
+    assert result.subtasks[1].output == []
     assert all(event["type"] != "team_context_shared" for event in result.events)
 
 
@@ -253,7 +253,7 @@ def test_execution_mode_team_shares_context_and_records_events():
     result = workforce.execute(task_id="t-team", objective="run")
 
     assert result.mode == ExecutionMode.TEAM
-    assert read.output == ["hello"]
+    assert result.subtasks[1].output == ["hello"]
     assert any(event["type"] == "team_context_shared" for event in result.events)
     assert result.events[0]["type"] == "execution_started"
     assert result.events[0]["mode"] == "team"
@@ -395,7 +395,7 @@ def test_execution_pattern_parallel_runs_independent_tasks_concurrently():
     elapsed = time.time() - t0
 
     assert result.status == TaskStatus.COMPLETED
-    assert set(calls) == {"A", "B", "C"}
+    assert {task.output for task in result.subtasks} == {"A", "B", "C"}
     assert elapsed < 0.25, "Parallel tasks should finish faster than sequential (3 * 0.05s)"
     assert result.events[0]["pattern"] == "parallel"
 
@@ -646,11 +646,11 @@ def test_subtask_tracks_attempt_and_timing_fields():
         task_router=router,
     )
 
-    workforce.execute(task_id="t-fields", objective="run")
+    result = workforce.execute(task_id="t-fields", objective="run")
 
-    assert subtask.started_at is not None
-    assert subtask.completed_at is not None
-    assert subtask.completed_at >= subtask.started_at
+    assert result.subtasks[0].started_at is not None
+    assert result.subtasks[0].completed_at is not None
+    assert result.subtasks[0].completed_at >= result.subtasks[0].started_at
 
 
 def test_agent_max_concurrent_limits_parallel_claims():
@@ -933,3 +933,72 @@ def test_ollama_tool_requires_non_empty_prompt():
         assert False, "esperava ValueError"
     except ValueError as exc:
         assert "prompt" in str(exc)
+
+
+def test_execute_normalizes_subtasks_with_shared_params_reference():
+    toolkit = Toolkit()
+    toolkit.register(MarkerTool())
+
+    shared_calls: list[str] = []
+    shared_params = {"calls": shared_calls, "name": "first"}
+
+    task_a = Subtask(id="A", description="a", tool_name="mark", params=shared_params)
+    task_b = Subtask(id="B", description="b", tool_name="mark", params=shared_params)
+
+    captured_ids: list[int] = []
+
+    def on_task_created(subtask: Subtask) -> HookResult:
+        captured_ids.append(id(subtask.params))
+        if subtask.id == "A":
+            subtask.params["name"] = "mutated-in-hook"
+        return HookResult(allow=True)
+
+    workforce = Workforce(
+        planner=lambda _: [task_a, task_b],
+        agents={"main": Agent(name="main", toolkit=toolkit)},
+        task_router=router,
+        on_task_created=on_task_created,
+    )
+
+    result = workforce.execute(task_id="t-normalize", objective="run")
+
+    assert len(set(captured_ids)) == 2
+    assert result.subtasks[0].params["name"] == "mutated-in-hook"
+    assert result.subtasks[1].params["name"] == "first"
+    assert task_a.params["name"] == "first"
+    assert task_b.params["name"] == "first"
+
+
+def test_consecutive_execute_calls_do_not_share_mutations_from_planner_subtasks():
+    toolkit = Toolkit()
+    toolkit.register(MarkerTool())
+
+    planner_calls: list[Subtask] = []
+    shared_list: list[str] = []
+
+    def planner(_: str) -> list[Subtask]:
+        task = Subtask(
+            id="A",
+            description="a",
+            tool_name="mark",
+            params={"calls": shared_list, "name": "A"},
+            metadata={"tags": ["seed"]},
+            depends_on=[],
+        )
+        planner_calls.append(task)
+        return [task]
+
+    workforce = Workforce(
+        planner=planner,
+        agents={"main": Agent(name="main", toolkit=toolkit)},
+        task_router=router,
+    )
+
+    first = workforce.execute(task_id="t-first", objective="run")
+    second = workforce.execute(task_id="t-second", objective="run")
+
+    assert first.subtasks[0].metadata is not second.subtasks[0].metadata
+    assert first.subtasks[0].metadata["routed_agent"] == "main"
+    assert second.subtasks[0].metadata["routed_agent"] == "main"
+    assert "routed_agent" not in planner_calls[0].metadata
+    assert "routed_agent" not in planner_calls[1].metadata
