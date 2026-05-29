@@ -2,6 +2,8 @@
 
 Implementação inicial de **Workforce real** com:
 
+> **Nota sobre a migração ADK:** a implementação greenfield da Fase 1 foi movida para o repositório dedicado [`CristianoSchwening/adk-agent-orchestrator`](https://github.com/CristianoSchwening/adk-agent-orchestrator). Este repositório permanece como referência do orquestrador legado, contrato UI/engine e documentação comparativa de arquitetura; veja também [`docs/adk_phase1_repository.md`](docs/adk_phase1_repository.md).
+
 - Registro de agentes com toolkits próprios.
 - Planejamento e execução de subtarefas.
 - Roteamento de subtarefas para agentes específicos.
